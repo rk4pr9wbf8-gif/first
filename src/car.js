@@ -150,7 +150,15 @@ export class Car {
 
   // Swap the placeholder body for the detailed glTF supercar.
   async loadModel(url, envMap) {
-    const gltf = await new GLTFLoader().loadAsync(url);
+    const loader = new GLTFLoader();
+    let gltf;
+    if (url.endsWith('.txt')) {
+      // base64-encoded .glb, for hosts that only serve text and images
+      const b64 = (await (await fetch(url)).text()).trim();
+      const bin = atob(b64), buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      gltf = await loader.parseAsync(buf.buffer, '');
+    } else gltf = await loader.loadAsync(url);
     const model = gltf.scene;
     const paint = this.paint = new THREE.MeshPhysicalMaterial({
       color: PAINTS[this.paintIndex], metalness: 0.65, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.03,
