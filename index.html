@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Alcan Autumn</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800;900&family=Overpass+Mono:wght@500;700&display=swap">
+<style>
+  /* Layout: full-bleed 3D stage; HUD pinned to corners like roadside signage. */
+  :root {
+    --sign-green: #006b54;     /* FHWA guide-sign green */
+    --sign-white: #f6f4ec;
+    --warn-yellow: #f2c230;
+    --asphalt: #15191a;
+    --ink: #0d1110;
+    --glass: rgba(10, 18, 16, 0.62);
+    --font-sign: 'Overpass', 'Highway Gothic', 'Arial Narrow', system-ui, sans-serif;
+    --font-num: 'Overpass Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--asphalt); color: var(--sign-white); overflow: hidden; font-family: var(--font-sign); }
+  body { touch-action: none; user-select: none; -webkit-user-select: none; }
+  #stage, #stage canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  [hidden] { display: none !important; }
+
+  /* ---------- title ---------- */
+  #title {
+    position: fixed; inset: 0; display: grid; place-items: end start; padding: max(24px, 5vw);
+    background: linear-gradient(180deg, rgba(8,12,11,0.15) 0%, rgba(8,12,11,0.25) 45%, rgba(8,12,11,0.88) 100%);
+  }
+  .title-card { max-width: 40rem; display: grid; gap: 18px; }
+  .eyebrow { font-weight: 800; letter-spacing: 0.22em; font-size: 0.78rem; color: var(--warn-yellow); text-transform: uppercase; }
+  h1 { margin: 0; font-weight: 900; font-size: clamp(3rem, 9vw, 6.5rem); line-height: 0.88; letter-spacing: -0.01em; text-wrap: balance; }
+  h1 span { display: block; color: var(--warn-yellow); }
+  .lede { margin: 0; font-size: clamp(1rem, 2.2vw, 1.2rem); line-height: 1.5; max-width: 34rem; color: #dcd8cc; }
+  .loadrow { display: grid; gap: 8px; max-width: 26rem; }
+  .bar { height: 6px; background: repeating-linear-gradient(90deg, rgba(246,244,236,0.18) 0 18px, transparent 18px 30px); border-radius: 3px; overflow: hidden; }
+  #bar-fill { height: 100%; background: var(--warn-yellow); transform-origin: left; transform: scaleX(0); transition: transform 0.25s; }
+  #load-label { font-family: var(--font-num); font-size: 0.8rem; color: #b8b4a8; }
+  #start {
+    justify-self: start; font: 800 1.15rem/1 var(--font-sign); color: var(--sign-white); background: var(--sign-green);
+    border: 3px solid var(--sign-white); outline: 3px solid var(--sign-green); border-radius: 10px; padding: 16px 26px 13px; cursor: pointer;
+    letter-spacing: 0.02em; transition: transform 0.15s, filter 0.15s;
+  }
+  #start:disabled { filter: grayscale(1) brightness(0.6); cursor: wait; }
+  #start:not(:disabled):hover { transform: translateY(-2px); }
+  #start:focus-visible { outline-color: var(--warn-yellow); }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 0.85rem; color: #c9c5b8; }
+  .keys b { font-family: var(--font-num); font-weight: 700; color: var(--sign-white); background: rgba(255,255,255,0.1); border-radius: 4px; padding: 1px 6px; margin-right: 4px; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  .safe-t { top: calc(14px + env(safe-area-inset-top, 0px)); }
+  .safe-b { bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
+  #region {
+    position: fixed; left: 16px; background: var(--sign-green); color: var(--sign-white); border: 3px solid var(--sign-white);
+    outline: 4px solid var(--sign-green); border-radius: 9px; padding: 10px 18px 8px; min-width: 12rem;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.35); opacity: 0; transform: translateY(-12px); transition: opacity 0.6s, transform 0.6s;
+  }
+  #region.show { opacity: 1; transform: none; }
+  #region .ent { font-size: 0.7rem; font-weight: 800; letter-spacing: 0.2em; }
+  #sign-name { font-size: clamp(1.3rem, 3.4vw, 2rem); font-weight: 800; line-height: 1.05; }
+  #sign-state { font-size: 0.75rem; font-weight: 800; letter-spacing: 0.25em; opacity: 0.85; }
+  #tunnel-sign {
+    position: fixed; left: 50%; width: 78px; height: 78px; margin-left: -39px; background: var(--warn-yellow); color: var(--ink);
+    transform: rotate(45deg) scale(0.7); border: 3px solid var(--ink); outline: 3px solid var(--warn-yellow); border-radius: 6px;
+    display: grid; place-items: center; opacity: 0; transition: opacity 0.4s, transform 0.4s;
+  }
+  #tunnel-sign.show { opacity: 1; transform: rotate(45deg) scale(1); }
+  #tunnel-sign > div { transform: rotate(-45deg); text-align: center; font-weight: 900; font-size: 0.72rem; line-height: 1.05; }
+  #tunnel-len { display: block; font-family: var(--font-num); font-size: 0.68rem; }
+  #mapwrap { position: fixed; right: 16px; display: grid; justify-items: center; gap: 6px; }
+  #minimap { width: 150px; height: 150px; border-radius: 50%; border: 2px solid rgba(246,244,236,0.5); }
+  #heading { font: 700 0.85rem var(--font-num); background: var(--glass); padding: 2px 10px; border-radius: 99px; }
+  #speedo { position: fixed; right: 18px; text-align: right; display: grid; gap: 2px; }
+  #speed { font: 700 clamp(3rem, 8vw, 4.6rem)/0.9 var(--font-num); font-variant-numeric: tabular-nums; text-shadow: 0 2px 18px rgba(0,0,0,0.5); }
+  .unitrow { display: flex; justify-content: flex-end; gap: 10px; align-items: baseline; font-weight: 800; letter-spacing: 0.12em; font-size: 0.8rem; text-transform: uppercase; }
+  #gear { font-family: var(--font-num); background: var(--warn-yellow); color: var(--ink); border-radius: 4px; padding: 0 6px; }
+  .tachbar { width: 190px; height: 5px; background: rgba(246,244,236,0.2); border-radius: 3px; overflow: hidden; justify-self: end; }
+  #tach { height: 100%; background: linear-gradient(90deg, var(--sign-white) 70%, var(--warn-yellow) 85%, #e0442a); transform-origin: left; }
+  #post {
+    position: fixed; left: 16px; background: var(--sign-green); border: 2px solid var(--sign-white); border-radius: 6px;
+    padding: 6px 12px 4px; display: grid; gap: 1px; font-variant-numeric: tabular-nums; min-width: 7.5rem;
+  }
+  #post .lab { font-size: 0.62rem; letter-spacing: 0.2em; font-weight: 800; opacity: 0.85; }
+  #post .val { font: 700 1.3rem/1.1 var(--font-num); }
+  #post .sub { font: 500 0.75rem var(--font-num); opacity: 0.85; }
+  #toast {
+    position: fixed; left: 50%; bottom: calc(110px + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 10px);
+    background: var(--glass); padding: 8px 16px 6px; border-radius: 99px; font-weight: 600; opacity: 0; transition: opacity 0.3s, transform 0.3s; white-space: nowrap;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #help {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(10,18,16,0.88); border: 2px solid var(--sign-white);
+    border-radius: 12px; padding: 18px 22px; display: grid; grid-template-columns: auto auto; gap: 6px 20px; font-size: 0.95rem; max-width: calc(100vw - 32px);
+  }
+  #help b { font-family: var(--font-num); color: var(--warn-yellow); }
+  #help h2 { grid-column: 1 / -1; margin: 0 0 6px; font-size: 1rem; letter-spacing: 0.15em; }
+
+  /* ---------- touch ---------- */
+  #touch { position: fixed; inset: auto 0 0 0; height: 0; }
+  .tbtn {
+    position: fixed; width: 76px; height: 76px; border-radius: 18px; background: rgba(246,244,236,0.13); border: 2px solid rgba(246,244,236,0.45);
+    color: var(--sign-white); font: 800 1.5rem var(--font-sign); display: grid; place-items: center; touch-action: none; pointer-events: auto;
+  }
+  .tbtn.on { background: rgba(242,194,48,0.45); }
+  #t-left { left: 16px; bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
+  #t-right { left: 104px; bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
+  #t-gas { right: 16px; bottom: calc(22px + env(safe-area-inset-bottom, 0px)); height: 110px; }
+  #t-brake { right: 104px; bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
+  #t-cam, #t-time, #t-auto { width: 52px; height: 40px; font-size: 0.75rem; border-radius: 10px; }
+  #t-auto { right: 136px; top: calc(200px + env(safe-area-inset-top, 0px)); }
+  #t-cam { right: 16px; top: calc(200px + env(safe-area-inset-top, 0px)); }
+  #t-time { right: 76px; top: calc(200px + env(safe-area-inset-top, 0px)); }
+  body.touch-ui #speedo { bottom: calc(150px + env(safe-area-inset-bottom, 0px)); }
+  body.touch-ui #post { display: none; }
+  body.touch-ui #toast { bottom: calc(196px + env(safe-area-inset-bottom, 0px)); }
+  @media (max-width: 600px) {
+    #minimap { width: 104px; height: 104px; }
+    #region { min-width: 0; padding: 8px 12px 6px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="stage"></div>
+
+<section id="title">
+  <div class="title-card">
+    <div class="eyebrow">Cascade Range → Chugach Range · October</div>
+    <h1>Alcan<span>Autumn</span></h1>
+    <p class="lede">An endless drive through fall color. Douglas fir and vine maple give way to birch, spruce and glaciers as the highway threads valleys, bores through ridges and crosses fjords.</p>
+    <div class="loadrow">
+      <div class="bar"><div id="bar-fill"></div></div>
+      <div id="load-label">Starting engine</div>
+    </div>
+    <button id="start" disabled>Loading…</button>
+    <div class="keys">
+      <span><b>W A S D</b>/ arrows drive</span><span><b>Space</b>handbrake</span><span><b>C</b>camera</span>
+      <span><b>T</b>time of day</span><span><b>O</b>autopilot</span><span><b>Q</b>quality</span><span><b>?</b>all controls</span>
+    </div>
+  </div>
+</section>
+
+<section id="hud" hidden>
+  <div id="region" class="safe-t"><div class="ent">ENTERING</div><div id="sign-name">North Cascades</div><div id="sign-state">WASHINGTON</div></div>
+  <div id="tunnel-sign" class="safe-t"><div>TUNNEL<span id="tunnel-len">—</span></div></div>
+  <div id="mapwrap" class="safe-t"><canvas id="minimap" width="300" height="300"></canvas><div id="heading">N</div></div>
+  <div id="post" class="safe-b">
+    <div class="lab">DISTANCE</div><div class="val"><span id="odo">0.0</span> <span id="odo-unit">km</span></div>
+    <div class="sub">ELEV <span id="elev">0 m</span></div>
+    <div class="sub" id="tod">Golden hour</div>
+  </div>
+  <div id="speedo" class="safe-b">
+    <div id="speed">0</div>
+    <div class="unitrow"><span id="unit">km/h</span><span id="gear">1</span></div>
+    <div class="tachbar"><div id="tach"></div></div>
+  </div>
+  <div id="toast"></div>
+</section>
+
+<div id="help" hidden>
+  <h2>CONTROLS</h2>
+  <b>W / ↑</b><span>Accelerate</span>
+  <b>S / ↓</b><span>Brake · reverse</span>
+  <b>A D / ← →</b><span>Steer</span>
+  <b>Space</b><span>Handbrake (drift)</span>
+  <b>C</b><span>Camera: chase, far, bumper, roadside, drone</span>
+  <b>Mouse drag · wheel</b><span>Look around · zoom</span>
+  <b>T</b><span>Time of day</span>
+  <b>O</b><span>Scenic autopilot</span>
+  <b>H</b><span>Headlights</span>
+  <b>R</b><span>Back to the road</span>
+  <b>P</b><span>Paint colour</span>
+  <b>U</b><span>km/h ↔ mph</span>
+  <b>Q</b><span>Graphics quality</span>
+  <b>M</b><span>Mute</span>
+  <b>Gamepad</b><span>Stick steer · triggers · Y camera</span>
+</div>
+
+<div id="touch" hidden>
+  <div class="tbtn" id="t-left">◀</div><div class="tbtn" id="t-right">▶</div>
+  <div class="tbtn" id="t-brake">▼</div><div class="tbtn" id="t-gas">▲</div>
+  <div class="tbtn" id="t-cam">CAM</div><div class="tbtn" id="t-time">TIME</div><div class="tbtn" id="t-auto">AUTO</div>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
