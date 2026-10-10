@@ -2,10 +2,11 @@
 // bicycle-model tyre simulation (slip angles, load transfer, handbrake
 // drifts), airborne physics and wall / tree collisions.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FLAG_TUNNEL, FLAG_BRIDGE, ROAD_EDGE, TUBE_HALF } from './road.js';
 
 const G = 9.81;
-export const PAINTS = [0x1f4a3b, 0x8c1d1d, 0x1d3a5f, 0xd9d4c7, 0x2b2b2e, 0xc6852d];
+export const PAINTS = [0x9e0b0b, 0x0f3d2e, 0x0b2a5c, 0xe8e6e0, 0x141416, 0xd98a13, 0x5a5f66];
 
 function bodyShape() {
   const s = new THREE.Shape();
@@ -147,6 +148,67 @@ export class Car {
     this.paintIndex = 0;
   }
 
+  // Swap the placeholder body for the detailed glTF supercar.
+  async loadModel(url, envMap) {
+    const gltf = await new GLTFLoader().loadAsync(url);
+    const model = gltf.scene;
+    const paint = this.paint = new THREE.MeshPhysicalMaterial({
+      color: PAINTS[this.paintIndex], metalness: 0.65, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.03,
+      envMapIntensity: 1.4,
+    });
+    const chrome = new THREE.MeshPhysicalMaterial({ color: 0xe8e8ea, metalness: 1, roughness: 0.12, envMapIntensity: 1.5 });
+    const rim = new THREE.MeshPhysicalMaterial({ color: 0x47494e, metalness: 1, roughness: 0.3, clearcoat: 0.6, envMapIntensity: 1.3 });
+    const glass = new THREE.MeshPhysicalMaterial({ color: 0x0b0e12, metalness: 0.0, roughness: 0.02, clearcoat: 1, transparent: true, opacity: 0.55, envMapIntensity: 2.2, depthWrite: false });
+    const tire = new THREE.MeshStandardMaterial({ color: 0x111112, roughness: 0.88 });
+    this.headMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff2dc, emissiveIntensity: 0.4, roughness: 0.05, metalness: 0.2 });
+    this.tailMat = new THREE.MeshStandardMaterial({ color: 0x500000, emissive: 0xff1208, emissiveIntensity: 0.6, roughness: 0.15 });
+    const byName = (n) => model.getObjectByName(n);
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      // the sun's shadow map is ~10 cm per texel: self-shadowing on curved
+      // panels turns into acne, so the car only casts shadows
+      o.castShadow = true; o.receiveShadow = false;
+      const mn = (o.material?.name || '').toLowerCase();
+      if (mn === 'body_color') o.material = paint;
+      else if (mn === 'metal_chrome') o.material = chrome;
+      else if (mn === 'tires') o.material = tire;
+      else if (mn === 'glass_gray' || mn === 'projector_glass') o.material = glass;
+      else if (mn === 'taillight_glass') o.material = this.tailMat;
+      else if (mn === 'turn_signal_led') o.material = this.headMat;
+      if (o.material && o.material !== glass) { o.material.envMapIntensity = o.material.envMapIntensity ?? 1; }
+    });
+    for (const n of ['rim_fl', 'rim_fr', 'rim_rl', 'rim_rr', 'trim']) byName(n)?.traverse(o => { if (o.isMesh) o.material = rim; });
+    byName('glass')?.traverse(o => { if (o.isMesh) { o.material = glass; o.castShadow = false; } });
+    byName('lights')?.traverse(o => { if (o.isMesh) o.material = this.headMat; });
+    byName('lights_red')?.traverse(o => { if (o.isMesh) o.material = this.tailMat; });
+    this.reflective = [paint, chrome, rim, glass, this.headMat];
+    if (envMap) this.setEnvMap(envMap);
+    // replace body + wheels
+    this.body.clear();
+    for (const wh of this.wheels) this.root.remove(wh.pivot);
+    this.body.add(model);
+    model.updateMatrixWorld(true);
+    this.wheels = [];
+    for (const [n, front] of [['wheel_fl', true], ['wheel_fr', true], ['wheel_rl', false], ['wheel_rr', false]]) {
+      const w = byName(n);
+      if (!w) continue;
+      const pivot = new THREE.Group();
+      const wp = new THREE.Vector3(); w.getWorldPosition(wp);
+      this.root.worldToLocal(wp);
+      pivot.position.copy(wp);
+      this.root.add(pivot);
+      pivot.updateMatrixWorld(true);
+      pivot.attach(w);
+      this.wheels.push({ pivot, w, front, base: w.rotation.x });
+    }
+    for (const l of this.lights) l.position.y = 0.68;
+    this.isModel = true;
+  }
+
+  setEnvMap(tex) {
+    for (const m of this.reflective || [this.paint]) { m.envMap = tex; m.needsUpdate = true; }
+  }
+
   nextPaint() { this.paintIndex = (this.paintIndex + 1) % PAINTS.length; this.paint.color.setHex(PAINTS[this.paintIndex]); }
 
   place(x, z, th, y) { this.x = x; this.z = z; this.th = th; this.y = y; this.vy = 0; this.vx = 0; this.vyl = 0; this.w = 0; this.steer = 0; }
@@ -181,7 +243,7 @@ export class Car {
     const onRoad = !!(q && q.d < ROAD_EDGE + 0.4 && Math.abs(this.y - q.y) < 1.5);
     this.onRoad = onRoad;
     this.surface = onRoad ? 'road' : 'dirt';
-    const mu = onRoad ? 1.15 : 0.72;
+    const mu = onRoad ? 1.25 : 0.72;
 
     // steering
     const maxSteer = 0.6 / (1 + sp / 13);
@@ -193,9 +255,9 @@ export class Car {
     // longitudinal
     let Fx = 0;
     const thr = input.throttle, brk = input.brake;
-    if (thr > 0) Fx += thr * Math.min(10500, 175000 / Math.max(sp, 1)) * (this.vx < -0.5 ? 0 : 1);
+    if (thr > 0) Fx += thr * Math.min(13500, 330000 / Math.max(sp, 1)) * (this.vx < -0.5 ? 0 : 1);
     if (brk > 0) {
-      if (this.vx > 0.5) Fx -= brk * 15500;
+      if (this.vx > 0.5) Fx -= brk * 19000;
       else if (this.vx > -9) Fx -= brk * 5200; // reverse
     }
     if (thr > 0 && this.vx < -0.5) Fx += thr * 15500;
@@ -224,7 +286,7 @@ export class Car {
     const vxs = Math.max(Math.abs(this.vx), 1.5);
     let af = Math.atan2(this.vyl + a * this.w, vxs) - d * Math.sign(this.vx || 1);
     let ar = Math.atan2(this.vyl - b * this.w, vxs);
-    const Cf = 82000, Cr = 92000;
+    const Cf = 95000, Cr = 108000;
     const muR = input.handbrake ? mu * 0.55 : mu;
     let Fyf = Math.max(-mu * Nf, Math.min(mu * Nf, -Cf * af));
     let Fyr = Math.max(-muR * Nr, Math.min(muR * Nr, -Cr * ar));
@@ -348,7 +410,7 @@ export class Car {
     this.wheelSpin += (this.vx / 0.36) * dt;
     for (const wh of this.wheels) {
       wh.pivot.rotation.y = wh.front ? -this.steer : 0;
-      wh.w.rotation.x = this.wheelSpin;
+      wh.w.rotation.x = (wh.base || 0) + this.wheelSpin;
     }
     this.impact *= Math.max(0, 1 - dt * 3);
   }

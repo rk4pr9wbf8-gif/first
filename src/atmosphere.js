@@ -4,11 +4,11 @@ import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 
 export const PRESETS = [
-  { name: 'Morning mist', hour: 8.1, turbidity: 9, rayleigh: 2.2, mie: 0.012, fog: 0.00016, fogCol: [0.62, 0.66, 0.70], cloud: 0.48, exposure: 0.85 },
-  { name: 'Midday', hour: 12.6, turbidity: 4.5, rayleigh: 1.2, mie: 0.004, fog: 0.000055, fogCol: [0.56, 0.66, 0.80], cloud: 0.55, exposure: 0.6 },
-  { name: 'Golden hour', hour: 16.9, turbidity: 6.5, rayleigh: 1.9, mie: 0.006, fog: 0.00007, fogCol: [0.80, 0.68, 0.52], cloud: 0.52, exposure: 0.72 },
-  { name: 'Dusk', hour: 18.15, turbidity: 8, rayleigh: 3.0, mie: 0.008, fog: 0.00008, fogCol: [0.42, 0.32, 0.34], cloud: 0.5, exposure: 1.15 },
-  { name: 'Night', hour: 22.5, turbidity: 2, rayleigh: 0.5, mie: 0.003, fog: 0.00009, fogCol: [0.018, 0.024, 0.04], cloud: 0.6, exposure: 1.5 },
+  { name: 'Morning mist', hour: 8.1, turbidity: 9, rayleigh: 2.2, mie: 0.012, fog: 0.0007, fogK: 1 / 160, fogCol: [0.66, 0.69, 0.72], cloud: 0.48, exposure: 0.8 },
+  { name: 'Midday', hour: 12.6, turbidity: 4.5, rayleigh: 1.2, mie: 0.004, fog: 0.00008, fogK: 1 / 700, fogCol: [0.58, 0.67, 0.80], cloud: 0.55, exposure: 0.6 },
+  { name: 'Golden hour', hour: 16.9, turbidity: 6.5, rayleigh: 1.9, mie: 0.006, fog: 0.00011, fogK: 1 / 450, fogCol: [0.74, 0.64, 0.52], cloud: 0.52, exposure: 0.72 },
+  { name: 'Dusk', hour: 18.15, turbidity: 8, rayleigh: 3.0, mie: 0.008, fog: 0.0002, fogK: 1 / 380, fogCol: [0.40, 0.31, 0.33], cloud: 0.5, exposure: 1.15 },
+  { name: 'Night', hour: 22.5, turbidity: 2, rayleigh: 0.5, mie: 0.003, fog: 0.00018, fogK: 1 / 500, fogCol: [0.018, 0.024, 0.04], cloud: 0.6, exposure: 1.5 },
 ];
 
 const cloudVS = `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`;

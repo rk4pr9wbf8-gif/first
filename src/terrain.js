@@ -6,16 +6,19 @@ import { biomeAt, forestDensity, deciduousFraction, foliageHue } from './world.j
 import { INFL } from './road.js';
 
 const ROOT = 8192;
-const MIN_SIZE = 64;
+let MIN_SIZE = 64;
+export function setTerrainDetail(min) { MIN_SIZE = min; }
 const N = 32;
 const SPLIT = 1.7;
 
-export function makeTerrainMaterial(tex, uniforms) {
+export function makeTerrainMaterial(tex, uniforms, nrm) {
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0 });
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, uniforms, {
       tGrass: { value: tex.grass }, tLitter: { value: tex.litter }, tRock: { value: tex.rock },
       tSnow: { value: tex.snow }, tGravel: { value: tex.gravel }, tNoise: { value: tex.noise },
+      nGrass: { value: nrm.grassN }, nLitter: { value: nrm.litterN }, nRock: { value: nrm.rockN },
+      nSnow: { value: nrm.snowN }, nGravel: { value: nrm.gravelN },
     });
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
@@ -28,13 +31,21 @@ export function makeTerrainMaterial(tex, uniforms) {
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform sampler2D tGrass, tLitter, tRock, tSnow, tGravel, tNoise;
+        uniform sampler2D nGrass, nLitter, nRock, nSnow, nGravel;
         uniform float uTreeDist;
         varying vec4 vData; varying float vRoad; varying vec3 vWPos; varying vec3 vWNrm;
-        float tRough;
-        vec3 triRock(vec3 p, vec3 n, float s) {
-          vec3 w = pow(abs(n), vec3(4.0)); w /= (w.x + w.y + w.z);
-          return texture2D(tRock, p.zy * s).rgb * w.x + texture2D(tRock, p.xz * s).rgb * w.y + texture2D(tRock, p.xy * s).rgb * w.z;
-        }`)
+        float tRough; vec3 tN;
+        vec3 tri3(sampler2D t, vec3 p, vec3 w, float s) {
+          return texture2D(t, p.zy * s).rgb * w.x + texture2D(t, p.xz * s).rgb * w.y + texture2D(t, p.xy * s).rgb * w.z;
+        }
+        // world-space perturbation from a triplanar normal map
+        vec3 triN(sampler2D t, vec3 p, vec3 w, float s) {
+          vec2 a = texture2D(t, p.zy * s).xy * 2.0 - 1.0;
+          vec2 b = texture2D(t, p.xz * s).xy * 2.0 - 1.0;
+          vec2 c = texture2D(t, p.xy * s).xy * 2.0 - 1.0;
+          return vec3(0.0, a.y, a.x) * w.x + vec3(b.x, 0.0, b.y) * w.y + vec3(c.x, c.y, 0.0) * w.z;
+        }
+        vec3 planN(sampler2D t, vec2 uv) { vec2 n = texture2D(t, uv).xy * 2.0 - 1.0; return vec3(n.x, 0.0, n.y); }`)
       .replace('#include <map_fragment>', `
         vec3 N = normalize(vWNrm);
         float slope = 1.0 - N.y;
@@ -44,43 +55,68 @@ export function makeTerrainMaterial(tex, uniforms) {
         vec4 nzs = texture2D(tNoise, wp * 0.021);
         float biome = vData.x, forest = vData.y, decid = vData.z, hue = vData.w;
         float far = smoothstep(25.0, 260.0, dist);
-        vec3 grass = mix(texture2D(tGrass, wp * 0.22).rgb, texture2D(tGrass, wp * 0.027).rgb, 0.25 + far * 0.6);
+        float near = 1.0 - smoothstep(60.0, 400.0, dist);
+        vec3 tw = pow(abs(N), vec3(4.0)); tw /= (tw.x + tw.y + tw.z);
+
+        vec2 g1 = wp * 0.22, g2 = wp * 0.027;
+        vec3 grass = mix(texture2D(tGrass, g1).rgb, texture2D(tGrass, g2).rgb, 0.25 + far * 0.6);
+        vec3 grassN = planN(nGrass, g1);
+        // dry vs lush meadow grass, rust-red alpine tundra up north
+        grass *= mix(vec3(1.0), vec3(1.12, 1.0, 0.78), smoothstep(0.4, 0.8, nz.g) * (1.0 - biome));
         float tundra = biome * smoothstep(350.0, 850.0, vWPos.y) * smoothstep(0.35, 0.7, nz.g);
         grass = mix(grass, grass * vec3(1.55, 0.72, 0.5), tundra);
-        grass *= mix(vec3(1.0), vec3(0.92, 1.0, 0.85), (1.0 - biome) * nz.b);
-        vec3 litter = mix(texture2D(tLitter, wp * 0.28).rgb, texture2D(tLitter, wp * 0.04).rgb, 0.2 + far * 0.6);
-        vec3 ground = mix(grass, litter, smoothstep(0.22, 0.6, forest + (nzs.b - 0.5) * 0.5));
-        // far forest canopy painted onto the ground, mottled per crown
+        vec2 l1 = wp * 0.28;
+        vec3 litter = mix(texture2D(tLitter, l1).rgb, texture2D(tLitter, wp * 0.04).rgb, 0.2 + far * 0.6);
+        vec3 litterN = planN(nLitter, l1);
+        float lw = smoothstep(0.22, 0.6, forest + (nzs.b - 0.5) * 0.5);
+        vec3 ground = mix(grass, litter, lw);
+        vec3 pert = mix(grassN, litterN, lw);
+
         float cf = smoothstep(uTreeDist * 0.5, uTreeDist * 0.92, dist) * smoothstep(0.05, 0.25, forest);
         vec4 cn = texture2D(tNoise, wp * 0.0042);
         vec4 cn2 = texture2D(tNoise, wp * 0.0011);
-        vec3 conifer = mix(vec3(0.030, 0.052, 0.034), vec3(0.055, 0.082, 0.045), cn.r) * mix(vec3(1.0), vec3(0.9, 0.98, 1.08), biome);
-        vec3 red = mix(vec3(0.42, 0.05, 0.03), vec3(0.62, 0.18, 0.03), cn.g);
-        vec3 gold = mix(vec3(0.72, 0.42, 0.05), vec3(0.62, 0.52, 0.10), cn.g);
+        vec3 conifer = mix(vec3(0.030, 0.050, 0.034), vec3(0.052, 0.076, 0.045), cn.r) * mix(vec3(1.0), vec3(0.9, 0.98, 1.08), biome);
+        vec3 red = mix(vec3(0.40, 0.05, 0.03), vec3(0.58, 0.17, 0.03), cn.g);
+        vec3 gold = mix(vec3(0.66, 0.40, 0.05), vec3(0.58, 0.48, 0.10), cn.g);
         float isDec = smoothstep(1.0 - decid - 0.08, 1.0 - decid + 0.08, cn.b * 0.7 + cn.a * 0.3 + (cn2.g - 0.5) * 0.3);
-        vec3 canopy = mix(conifer, mix(red, gold, clamp(hue + (cn.r - 0.5) * 0.8, 0.0, 1.0)) * 0.7, isDec) * (0.6 + 0.7 * cn.a);
+        vec3 canopy = mix(conifer, mix(red, gold, clamp(hue + (cn.r - 0.5) * 0.8, 0.0, 1.0)) * 0.7, isDec) * (0.55 + 0.75 * cn.a);
         ground = mix(ground, canopy, cf * 0.95);
+
         float rockW = smoothstep(0.38, 0.56, slope + (nzs.r - 0.5) * 0.22 - cf * 0.08);
-        vec3 rockC = triRock(vWPos, N, 0.07) * mix(0.75, 1.1, nz.a);
-        rockC = mix(rockC, triRock(vWPos, N, 0.011), far * 0.6);
+        vec3 rockC = tri3(tRock, vWPos, tw, 0.07) * mix(0.72, 1.1, nz.a);
+        rockC = mix(rockC, tri3(tRock, vWPos, tw, 0.011), far * 0.6);
+        // basalt / granite banding by altitude
+        rockC *= mix(vec3(1.0), vec3(0.78, 0.76, 0.74), smoothstep(0.45, 0.6, sin(vWPos.y * 0.045 + nz.r * 3.0) * 0.5 + 0.5) * 0.6);
         vec3 col = mix(ground, rockC, rockW);
+        pert = mix(pert, triN(nRock, vWPos, tw, 0.07) * 1.6, rockW);
+
         float shoulder = 1.0 - smoothstep(6.2, 9.5, vRoad + (nzs.g - 0.5) * 3.0);
-        col = mix(col, texture2D(tGravel, wp * 0.45).rgb, shoulder * 0.92);
+        vec2 gv = wp * 0.45;
+        col = mix(col, texture2D(tGravel, gv).rgb, shoulder * 0.92);
+        pert = mix(pert, planN(nGravel, gv), shoulder);
+
         float sl = mix(1900.0, 1050.0, biome) + (nz.r - 0.5) * 360.0;
         float snowW = smoothstep(sl - 70.0, sl + 70.0, vWPos.y) * (1.0 - smoothstep(0.5, 0.78, slope - clamp((vWPos.y - sl) * 0.00025, 0.0, 0.25)));
-        col = mix(col, texture2D(tSnow, wp * 0.08).rgb, snowW);
+        // snow lingers in shaded gullies a little lower down
+        snowW = max(snowW, smoothstep(sl - 260.0, sl - 60.0, vWPos.y) * smoothstep(0.55, 0.8, nzs.a) * (1.0 - smoothstep(0.35, 0.6, slope)) * 0.8);
+        vec2 sv = wp * 0.08;
+        col = mix(col, texture2D(tSnow, sv).rgb, snowW);
+        pert = mix(pert, planN(nSnow, sv) * 0.5, snowW);
+
         float shore = 1.0 - smoothstep(0.3, 2.6, vWPos.y + (nzs.r - 0.5) * 1.5);
-        col = mix(col, texture2D(tGravel, wp * 0.3).rgb * vec3(0.75, 0.72, 0.66), shore);
+        col = mix(col, texture2D(tGravel, wp * 0.3).rgb * vec3(0.62, 0.6, 0.55), shore);
         col *= mix(1.0, 0.35, 1.0 - smoothstep(-8.0, 0.0, vWPos.y));
         col *= 0.8 + 0.38 * nz.r;
         diffuseColor.rgb = col;
-        tRough = mix(0.93, 0.62, snowW);
-        tRough = mix(tRough, 0.35, shore);
+        tN = normalize(N + pert * 0.55 * near);
+        tRough = mix(0.93, 0.55, snowW);
+        tRough = mix(tRough, 0.3, shore);
       `)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-        roughnessFactor = tRough;`);
+        roughnessFactor = tRough;`)
+      .replace('#include <normal_fragment_maps>', `normal = normalize((viewMatrix * vec4(tN, 0.0)).xyz);`);
   };
-  mat.customProgramCacheKey = () => 'terrain-v1';
+  mat.customProgramCacheKey = () => 'terrain-v2';
   return mat;
 }
 

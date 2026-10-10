@@ -50,8 +50,12 @@ export function baseHeight(x, z) {
   const lowland = 150 + 170 * noise2(x * 0.00005 + 5.5, z * 0.00005 + 9.1)
     - a * (110 + 190 * Math.max(0, noise2(x * 0.00007 - 3, z * 0.00007 + 2)));
   const hills = fbm(x * 0.0017 + 7, z * 0.0017 - 3, 3) * 34;
+  // drainage gullies scored into the mountain flanks
+  const mount = smoothstep(150, 900, peaks);
+  const gully = mount > 0.01 ? Math.pow(1 - Math.abs(noise2(wx * 0.0021 + 13, wz * 0.0021 - 7)), 6) * 32 * mount
+    + Math.pow(1 - Math.abs(noise2(wx * 0.0053 - 4, wz * 0.0053 + 9)), 8) * 12 * mount : 0;
   const detail = noise2(x * 0.011, z * 0.011) * 2.6 + noise2(x * 0.04, z * 0.04) * 0.6;
-  return lowland + peaks + hills + detail + volcanoes(x, z);
+  return lowland + peaks + hills - gully + detail + volcanoes(x, z);
 }
 
 export function treeline(x, z, a) {

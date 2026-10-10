@@ -1,6 +1,6 @@
 # Alcan Autumn
 
-An endless procedural driving game through fall colour, from the Cascade Range to the mountains of Alaska. It runs in the browser with Three.js and has no build step and no asset downloads: every texture, tree, mountain and sound is generated in code.
+An endless procedural driving game through fall colour, from the Cascade Range to the mountains of Alaska. It runs in the browser with Three.js and has no build step. The world itself (every texture, tree, mountain and sound) is generated in code; the only asset is the car model in `assets/car.glb`.
 
 ## Run it
 
@@ -42,7 +42,22 @@ A gamepad also works: left stick steers, triggers are throttle and brake, A/B is
 - **Terrain** (`src/world.js`, `src/terrain.js`): domain-warped ridged multifractal ranges and broad glacial valleys. Stratovolcanoes up to about 3 km high are scattered on a 15 km grid, so peaks like Rainier or Hood stand on the horizon. A slowly varying biome field blends the Cascadia look (Douglas fir, vine and bigleaf maple, higher snowline) into the Alaska look (spruce, paper birch, red tundra, fjords below sea level, a snowline near 1,000 m). Terrain streams as a quadtree with 32×32 leaves, from 2 m spacing at the car out to 256 m spacing about 15 km away, and skirts hide the cracks between levels.
 - **Road** (`src/road.js`): the centreline grows 4 m at a time. A "surveyor" tries nine headings, looks up to about 390 m ahead and prefers gentle grades, dry land and its general heading, and keeps away from earlier parts of the road. The vertical profile is smoothed and limited to a 12% grade. Where the hillside is more than 24 m above the road it bores a **tunnel**; where the ground falls more than 15 m below, or there is water, it builds a **bridge**. Morphological filtering removes slivers. The terrain is then carved to the road, with rough rock cuts and fills.
 - **Structures** (`src/roadmesh.js`): asphalt with a double yellow centre line and fog lines, gravel shoulders, W-beam guard rails where the ground drops away, delineator posts, viaducts with piers and parapets, and tunnels with sodium lamps and concrete portal collars that hug the hillside.
-- **Forest** (`src/vegetation.js`): instanced conifers, maples, birches, shrubs, boulders and grass tufts, placed in 256 m cells with two levels of detail. Maple, birch and shrub colours come from patchy "peak colour" noise, so you pass stands of crimson and stands of gold. Foliage sways in the wind, glows when the sun is behind it, and has ragged edges. Beyond the tree radius the terrain shader paints a matching canopy, so whole hillsides read as forest.
+- **Forest** (`src/vegetation.js`): instanced conifers, maples, birches, shrubs, textured boulders and grass tufts. Crowns are built from alpha-tested cards painted with maple leaves, birch leaves and needle sprays, lit with soft spherical normals, placed in 256 m cells with two levels of detail. Maple, birch and shrub colours come from patchy "peak colour" noise, so you pass stands of crimson and stands of gold. Foliage sways in the wind, glows when the sun is behind it, and has ragged edges. Beyond the tree radius the terrain shader paints a matching canopy, so whole hillsides read as forest.
+- **Lighting** (`src/realism.js`): every lit surface marches a ray toward the sun through a 16 km heightfield, so mountains cast shadows across whole valleys far beyond the shadow map's reach. The same heightfield darkens valley floors and gorges (large-scale ambient occlusion). Fog is height-based exponential haze with sun in-scattering, so valleys hold mist and the air glows toward the sun. Terrain, asphalt and concrete have detail normal maps. Ultra adds screen-space ambient occlusion (GTAO).
 - **Atmosphere** (`src/atmosphere.js`, `src/effects.js`): physical sky with an October sun path, drifting clouds, stars, image-based lighting, exponential fog, reflective fjord water, and falling leaves that swirl around the camera.
-- **Car** (`src/car.js`): a modelled wagon with clear-coat paint and working lights, driven by a bicycle-model tyre simulation. It has slip angles, load transfer, a handbrake for drifts, gentle stability control, slope gravity, and collisions with tunnel walls, parapets, guard rails, trees and boulders. The engine, tyre and wind sounds are synthesised with Web Audio, and tunnels add an echo.
+- **Car** (`src/car.js`, `assets/car.glb`): a detailed supercar model (about 358k triangles) with clear-coat metallic paint, tinted glass, chrome, gunmetal rims, wheels that spin and steer, and working head, tail and brake lights. On High and Ultra it reflects the world around it through a live cube map, re-rendered one face per frame. It's driven by a bicycle-model tyre simulation. It has slip angles, load transfer, a handbrake for drifts, gentle stability control, slope gravity, and collisions with tunnel walls, parapets, guard rails, trees and boulders. The engine, tyre and wind sounds are synthesised with Web Audio, and tunnels add an echo.
 - **HUD**: highway-sign style region names ("Entering Turnagain Arm"), a yellow tunnel warning sign showing the tunnel's length, a heading-up minimap, speed, gear, distance, elevation and time of day.
+
+## Quality levels
+
+| | Low | Medium | High | Ultra |
+| --- | --- | --- | --- | --- |
+| Shadow map | off | 1024 | 2048 | 4096 |
+| Ray-marched terrain shadows and valley occlusion | off | on | on | on |
+| Live car reflections | off | off | on | on |
+| GTAO ambient occlusion | off | off | off | on |
+| Finest terrain spacing | 4 m | 2 m | 2 m | 1 m |
+
+## Credits
+
+Car model: [Ferrari 458 Italia](https://sketchfab.com/models/57bf6cc56931426e87494f554df1dab6) by vicent091036, taken from the three.js examples. It was converted from Draco-compressed to quantized glTF so it loads without a WebAssembly decoder. Check the model's licence on Sketchfab before using it outside personal projects.

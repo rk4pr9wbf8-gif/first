@@ -4,10 +4,12 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { makeTextures } from './textures.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { RT, patchMaterial, HeightField } from './realism.js';
+import { makeTextures, makeDetailNormals, foliageAtlas } from './textures.js';
 import { biomeAt, baseHeight, regionAt, SEA_LEVEL } from './world.js';
 import { Road, makeGround, STEP, FLAG_TUNNEL, FLAG_BRIDGE } from './road.js';
-import { Terrain, makeTerrainMaterial } from './terrain.js';
+import { Terrain, makeTerrainMaterial, setTerrainDetail } from './terrain.js';
 import { Vegetation } from './vegetation.js';
 import { RoadMesh, makeRoadMaterials } from './roadmesh.js';
 import { Atmosphere, PRESETS } from './atmosphere.js';
@@ -21,10 +23,10 @@ const isTouch = matchMedia('(pointer: coarse)').matches;
 
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const QUALITY = [
-  { name: 'Low', pr: Math.min(DPR, 1) * 0.75, shadows: false, shadowSize: 1024, post: false, veg: 560, hiR: 180, dens: 0.55, terrainR: 9000, leaves: 300 },
-  { name: 'Medium', pr: Math.min(DPR, 1), shadows: true, shadowSize: 1024, post: true, veg: 760, hiR: 250, dens: 0.75, terrainR: 12000, leaves: 600 },
-  { name: 'High', pr: Math.min(DPR, 1.5), shadows: true, shadowSize: 2048, post: true, veg: 980, hiR: 330, dens: 1.0, terrainR: 15000, leaves: 900 },
-  { name: 'Ultra', pr: DPR, shadows: true, shadowSize: 4096, post: true, veg: 1300, hiR: 440, dens: 1.3, terrainR: 18000, leaves: 900 },
+  { name: 'Low', pr: Math.min(DPR, 1) * 0.75, shadows: false, shadowSize: 1024, post: false, veg: 560, hiR: 180, dens: 0.55, terrainR: 9000, leaves: 300, minLeaf: 128, rt: false, cube: false, ao: false },
+  { name: 'Medium', pr: Math.min(DPR, 1), shadows: true, shadowSize: 1024, post: true, veg: 760, hiR: 250, dens: 0.75, terrainR: 12000, leaves: 600, minLeaf: 64, rt: true, cube: false, ao: false },
+  { name: 'High', pr: Math.min(DPR, 1.5), shadows: true, shadowSize: 2048, post: true, veg: 980, hiR: 330, dens: 1.0, terrainR: 15000, leaves: 900, minLeaf: 64, rt: true, cube: true, ao: false },
+  { name: 'Ultra', pr: DPR, shadows: true, shadowSize: 4096, post: true, veg: 1300, hiR: 440, dens: 1.3, terrainR: 18000, leaves: 900, minLeaf: 32, rt: true, cube: true, ao: true },
 ];
 const CAMS = ['Chase', 'Far chase', 'Bumper', 'Roadside', 'Drone'];
 const START_IDX = 360;
@@ -60,17 +62,28 @@ function setupPost() {
   const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 });
   composer = new EffectComposer(renderer, rt);
   composer.addPass(new RenderPass(scene, camera));
+  if (Q.ao) {
+    const ao = new GTAOPass(scene, camera, size.x, size.y);
+    ao.blendIntensity = 0.8;
+    ao.updateGtaoMaterial({ radius: 1.2, distanceExponent: 1.5, thickness: 2, scale: 1, samples: 12 });
+    composer.addPass(ao);
+  }
   bloom = new UnrealBloomPass(new THREE.Vector2(size.x / 2, size.y / 2), 0.28, 0.6, 0.9);
   composer.addPass(bloom);
   grade = new ShaderPass({
-    uniforms: { tDiffuse: { value: null }, uVig: { value: 0.9 }, uSat: { value: 1.12 }, uFlash: { value: 0 } },
+    uniforms: { tDiffuse: { value: null }, uVig: { value: 0.9 }, uSat: { value: 1.18 }, uFlash: { value: 0 }, uTime: { value: 0 } },
     vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-    fragmentShader: `uniform sampler2D tDiffuse; uniform float uVig, uSat, uFlash; varying vec2 vUv;
-      void main(){ vec4 c = texture2D(tDiffuse, vUv); float l = dot(c.rgb, vec3(0.2126,0.7152,0.0722));
+    fragmentShader: `uniform sampler2D tDiffuse; uniform float uVig, uSat, uFlash, uTime; varying vec2 vUv;
+      void main(){ vec2 d0 = vUv - 0.5; vec4 c = texture2D(tDiffuse, vUv);
+        // faint lens chromatic aberration toward the edges
+        c.r = texture2D(tDiffuse, vUv - d0 * 0.0025).r; c.b = texture2D(tDiffuse, vUv + d0 * 0.0025).b;
+        float l = dot(c.rgb, vec3(0.2126,0.7152,0.0722));
         c.rgb = max(mix(vec3(l), c.rgb, uSat), 0.0);
         c.rgb *= vec3(1.02, 1.0, 0.97);
         vec2 d = vUv - 0.5; c.rgb *= 1.0 - dot(d, d) * uVig;
         c.rgb = mix(c.rgb, vec3(1.0, 0.95, 0.9) * 2.0, uFlash);
+        float gr = fract(sin(dot(vUv * 913.0 + uTime, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+        c.rgb *= 1.0 + gr * 0.035;
         gl_FragColor = c; }`,
   });
   composer.addPass(grade);
@@ -78,7 +91,7 @@ function setupPost() {
 }
 
 // ------------------------------------------------------------------ world
-let tex, road, ground, terrain, veg, roadMesh, atm, water, leaves, car, world;
+let tex, nrm, heightField, cubeRT, cubeCam, cubeFace = 0, road, ground, terrain, veg, roadMesh, atm, water, leaves, car, world;
 const audio = new CarAudio();
 const envMats = [];
 const tunnelLights = [];
@@ -104,7 +117,9 @@ async function init() {
   setProgress(0.03, 'Painting textures');
   await nextFrame();
   tex = makeTextures();
-  for (const t of Object.values(tex)) t.anisotropy = Math.min(t.anisotropy, renderer.capabilities.getMaxAnisotropy());
+  tex.atlas = foliageAtlas();
+  nrm = makeDetailNormals(tex);
+  for (const t of [...Object.values(tex), ...Object.values(nrm)]) t.anisotropy = Math.min(16, renderer.capabilities.getMaxAnisotropy());
 
   setProgress(0.12, 'Surveying the highway');
   await nextFrame();
@@ -118,16 +133,30 @@ async function init() {
   atm = new Atmosphere(renderer, scene, uniforms);
   if (saved.preset != null) { atm.presetIndex = saved.preset; atm.apply(PRESETS[saved.preset]); }
 
-  const tmat = makeTerrainMaterial(tex, uniforms);
+  setProgress(0.16, 'Measuring the ranges');
+  await nextFrame();
+  heightField = new HeightField();
+  while (heightField.update(road.px[startIdx], road.pz[startIdx], 64)) { /* full build up front */ }
+  const tmat = makeTerrainMaterial(tex, uniforms, nrm);
   terrain = new Terrain(scene, ground, tmat);
   terrain.viewRadius = Q.terrainR;
   veg = new Vegetation(scene, ground, uniforms, tex);
   veg.radius = Q.veg; veg.hiR = Q.hiR; veg.density = Q.dens;
   const rmats = makeRoadMaterials(tex, uniforms);
+  rmats.road.normalMap = nrm.asphaltN; rmats.road.normalScale.set(0.5, 0.5); rmats.road.roughness = 0.72;
+  for (const k of ['concrete', 'tunnel']) { rmats[k].normalMap = nrm.concreteN; }
+  rmats.rockcap.normalMap = nrm.rockN;
+  patchMaterial(tmat, { steps: 24 });
+  patchMaterial(veg.matFol, { steps: 14 }); patchMaterial(veg.matRock, { steps: 14 }); patchMaterial(veg.matTuft, { steps: 10, ao: true });
+  for (const k in rmats) if (k !== 'lamp') patchMaterial(rmats[k], { steps: 16 });
   roadMesh = new RoadMesh(scene, road, ground, rmats);
   water = makeWater(scene, tex, uniforms);
+  patchMaterial(water.mesh.material, { steps: 16 });
   leaves = makeLeaves(scene, tex, uniforms, 900);
   car = new Car(scene);
+  car.root.traverse(o => { if (o.isMesh && !o.material.userData.rt) { o.material.userData.rt = 1; patchMaterial(o.material, { steps: 12, ao: true }); } });
+  cubeRT = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType });
+  cubeCam = new THREE.CubeCamera(0.5, 1500, cubeRT);
   world = { road, ground, veg };
 
   road.onFinalize((i0, i1) => {
@@ -174,6 +203,12 @@ async function init() {
   applyQuality();
   renderer.compile(scene, camera);
   await nextFrame();
+  setProgress(0.99, 'Detailing the car');
+  try {
+    await car.loadModel('assets/car.glb', Q.cube ? cubeRT.texture : null);
+    car.body.traverse(o => { if (o.isMesh && !o.material.userData.rt) { o.material.userData.rt = 1; patchMaterial(o.material, { steps: 12, ao: true }); } });
+    envMats.push([car.paint, car.paint.envMapIntensity]);
+  } catch (e) { console.warn('Car model failed to load, using the simple car', e); }
   setProgress(1, 'Ready');
   $('start').disabled = false;
   $('start').textContent = 'Start driving';
@@ -194,7 +229,7 @@ function openRoadNear(i) {
 function teleport(i) {
   road.ensure(i + AHEAD);
   car.place(road.px[i], road.pz[i], road.hd[i], road.y[i] + 0.02);
-  carIdx = i; cine = null;
+  carIdx = i; cine = null; cubeFresh = true;
   snapCamera();
 }
 
@@ -209,6 +244,7 @@ function warm() {
 window.__alcan = {
   teleport: (i) => { teleport(i); warm(); }, warm, openRoadNear: (i) => openRoadNear(i),
   setCam: (m) => { camMode = m; cine = null; freeCam = null; snapCamera(); },
+  rt: (v) => { RT.uRTOn.value = v; },
   free: (x, y, z, lx, ly, lz) => { freeCam = [x, y, z, lx, ly, lz]; },
   info: () => ({ ...stats, geos: renderer.info.memory.geometries, progs: renderer.info.programs.length }),
   setPreset: (p) => { atm.presetIndex = p; atm.apply(PRESETS[p]); },
@@ -221,6 +257,7 @@ window.__alcan = {
 
 let reflectorMat;
 let stats = {};
+let cubeFresh = true;
 let autoQDone = new URLSearchParams(location.search).has('q'), autoQT = -2, autoQN = 0;
 let ready = false, started = false;
 let carIdx = 0;
@@ -240,6 +277,9 @@ function applyQuality() {
   if (atm.sun.shadow.map) { atm.sun.shadow.map.dispose(); atm.sun.shadow.map = null; }
   atm.sun.shadow.mapSize.set(Q.shadowSize, Q.shadowSize);
   terrain.viewRadius = Q.terrainR;
+  setTerrainDetail(Q.minLeaf);
+  RT.uRTOn.value = Q.rt ? 1 : 0;
+  if (car.reflective) car.setEnvMap(Q.cube ? cubeRT.texture : null);
   if (veg.density !== Q.dens) { veg.density = Q.dens; for (const c of veg.cells.values()) c.stale = true; }
   veg.radius = Q.veg; veg.hiR = Q.hiR;
   uniforms.uTreeDist.value = Q.veg;
@@ -581,6 +621,11 @@ function frame() {
   veg.update(cx, cz, ms * 0.8);
   roadMesh.update(cx, cz, 2);
 
+  heightField.update(cx, cz, 6);
+  RT.uSunW.value.copy(atm.sunDir);
+  RT.uFogSunCol.value.copy(atm.sunColor).multiplyScalar(atm.night > 0.9 ? 0.0 : atm.night > 0.3 ? 0.35 : 0.8);
+  RT.uFogK.value = atm.preset.fogK || 1 / 450;
+
   // tunnel lighting / eye adaptation
   const tf = tunnelDepth(car.x, car.z, car.y);
   tunnelF += (tf - tunnelF) * Math.min(1, dt * 2.5);
@@ -629,7 +674,26 @@ function frame() {
     }
   }
 
+  // live reflections for the car: one cube face per frame (all six on the first)
+  if (Q.cube && car.isModel) for (let f = 0; f < (cubeFresh ? 6 : 1); f++) {
+    cubeCam.position.set(car.x, car.y + 0.9, car.z);
+    cubeCam.updateMatrixWorld();
+    const au = renderer.shadowMap.autoUpdate;
+    renderer.shadowMap.autoUpdate = false;
+    car.root.visible = false; leaves.mesh.visible = false;
+    const prevRT = renderer.getRenderTarget();
+    renderer.setRenderTarget(cubeRT, cubeFace);
+    renderer.render(scene, cubeCam.children[cubeFace]);
+    renderer.setRenderTarget(prevRT);
+    car.root.visible = true; leaves.mesh.visible = true;
+    renderer.shadowMap.autoUpdate = au;
+    cubeFace = (cubeFace + 1) % 6;
+    if (cubeFace === 0) cubeRT.texture.needsPMREMUpdate = true;
+  }
+  cubeFresh = false;
+
   if (Q.post && composer) {
+    grade.uniforms.uTime.value = elapsed % 100;
     grade.uniforms.uFlash.value = car.impact * 0.15;
     composer.render();
   } else renderer.render(scene, camera);

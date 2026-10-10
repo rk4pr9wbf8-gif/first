@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { mulberry32, hash2, smoothstep, noise2 } from './noise.js';
+import { ATLAS } from './textures.js';
 import { baseHeight, biomeAt, forestDensity, deciduousFraction, foliageHue, treeline, SEA_LEVEL } from './world.js';
 import { FLAG_TUNNEL } from './road.js';
 
@@ -53,81 +54,186 @@ const shadeY = (y0, y1, lo = 0.5, hi = 1.0) => (c, x, y, z) => {
 
 function bark(r, g, b) { return (c) => c.setRGB(r, g, b); }
 
+// ---- leaf-card geometry -------------------------------------------------
+// atlas cell k -> uv rect (canvas row 0 is the top, textures are flipY)
+function cellUV(k, u, v) {
+  const c = k % ATLAS.cols, r = Math.floor(k / ATLAS.cols);
+  return [(c + 0.04 + u * 0.92) / ATLAS.cols, 1 - (r + 1) / ATLAS.rows + (0.04 + v * 0.92) / ATLAS.rows];
+}
+
+class CardBuilder {
+  constructor() { this.p = []; this.n = []; this.uv = []; this.c = []; this.t = []; this.idx = []; }
+  // centre, half-extent vectors R (u) and U (v), normal override per corner
+  card(cx, cy, cz, R, U, k, nrmFn, shadeFn, tint = 2) {
+    const base = this.p.length / 3;
+    const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (const [su, sv] of corners) {
+      const x = cx + R[0] * su + U[0] * sv, y = cy + R[1] * su + U[1] * sv, z = cz + R[2] * su + U[2] * sv;
+      this.p.push(x, y, z);
+      const n = nrmFn(x, y, z);
+      this.n.push(n[0], n[1], n[2]);
+      const uv = cellUV(k, (su + 1) / 2, (sv + 1) / 2);
+      this.uv.push(uv[0], uv[1]);
+      const g = shadeFn(x, y, z);
+      this.c.push(g, g, g); this.t.push(tint);
+    }
+    this.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  geometry() {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.n, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(this.c, 3));
+    g.setAttribute('aTint', new THREE.Float32BufferAttribute(this.t, 1));
+    g.setIndex(this.idx);
+    return g.toNonIndexed();
+  }
+}
+
+function barkPart(geo, colorFn) {
+  const g = prep(geo, colorFn, 0, true);
+  const uv = g.attributes.uv;
+  for (let i = 0; i < uv.count; i++) {
+    const [u, v] = cellUV(ATLAS.BARK, uv.getX(i) % 1, (uv.getY(i) * 3) % 1);
+    uv.setXY(i, u, v);
+  }
+  return g;
+}
+
+const norm3 = (x, y, z) => { const l = Math.hypot(x, y, z) || 1; return [x / l, y / l, z / l]; };
+const rndv = mulberry32(4242);
+
+function randUnit() {
+  const u = rndv() * 2 - 1, a = rndv() * Math.PI * 2, r = Math.sqrt(1 - u * u);
+  return [Math.cos(a) * r, u, Math.sin(a) * r];
+}
+
+// cards scattered through an ellipsoid crown with soft spherical normals
+function crownCards(cb, k, n, c, rad, size) {
+  for (let i = 0; i < n; i++) {
+    const d = randUnit();
+    const rr = 0.35 + 0.65 * Math.pow(rndv(), 0.5);
+    const x = c[0] + d[0] * rad[0] * rr, y = c[1] + d[1] * rad[1] * rr, z = c[2] + d[2] * rad[2] * rr;
+    // card faces roughly outward, with random roll
+    const nn = norm3(d[0] + (rndv() - 0.5), d[1] + (rndv() - 0.5), d[2] + (rndv() - 0.5));
+    let t = Math.abs(nn[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    let Rv = norm3(t[1] * nn[2] - t[2] * nn[1], t[2] * nn[0] - t[0] * nn[2], t[0] * nn[1] - t[1] * nn[0]);
+    let Uv = [nn[1] * Rv[2] - nn[2] * Rv[1], nn[2] * Rv[0] - nn[0] * Rv[2], nn[0] * Rv[1] - nn[1] * Rv[0]];
+    const roll = rndv() * Math.PI * 2, cs = Math.cos(roll), sn = Math.sin(roll);
+    const R2 = Rv.map((v, j) => v * cs + Uv[j] * sn), U2 = Uv.map((v, j) => -Rv[j] * sn + v * cs);
+    const s = size * (0.75 + rndv() * 0.5) / 2;
+    cb.card(x, y, z, R2.map(v => v * s), U2.map(v => v * s), k,
+      (px, py, pz) => norm3((px - c[0]) / rad[0] + nn[0] * 0.3, (py - c[1]) / rad[1] + 0.25 + nn[1] * 0.3, (pz - c[2]) / rad[2] + nn[2] * 0.3),
+      (px, py, pz) => {
+        const o = Math.hypot((px - c[0]) / rad[0], (py - c[1]) / rad[1], (pz - c[2]) / rad[2]);
+        return 0.42 + 0.5 * Math.min(1, o) + 0.18 * ((py - c[1]) / rad[1]);
+      });
+  }
+}
+
+function crossCards(cb, k, w, h, y0, n = 2) {
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI;
+    const R = [Math.cos(a) * w / 2, 0, Math.sin(a) * w / 2];
+    cb.card(0, y0 + h / 2, 0, R, [0, h / 2, 0], k,
+      (x, y, z) => norm3(x * 2, 0.6, z * 2), (x, y) => 0.55 + 0.5 * Math.min(1, (y - y0) / h));
+  }
+}
+
 function coniferHi() {
   const parts = [];
-  const tr = new THREE.CylinderGeometry(0.009, 0.02, 0.4, 6, 1, true); tr.translate(0, 0.2, 0);
-  parts.push(prep(tr, bark(0.16, 0.10, 0.06), 0));
-  const T = 7;
+  const tr = new THREE.CylinderGeometry(0.008, 0.02, 0.5, 7, 1, true); tr.translate(0, 0.25, 0);
+  parts.push(barkPart(tr, (c) => c.setRGB(0.42, 0.3, 0.24)));
+  const cb = new CardBuilder();
+  const T = 12;
   for (let k = 0; k < T; k++) {
     const t = k / (T - 1);
-    const yb = 0.1 + t * 0.74, h = 0.25 - t * 0.1, r = 0.145 * (1 - t * 0.8) + 0.02;
-    const cone = new THREE.ConeGeometry(r, h, 10, 1, true);
-    const p = cone.attributes.position;
-    for (let i = 0; i < p.count; i++) {
-      if (p.getY(i) < 0) {
-        const ang = Math.atan2(p.getZ(i), p.getX(i));
-        const seg = Math.round((ang / (Math.PI * 2)) * 10);
-        const f = (seg & 1) ? 0.72 : 1.0;
-        p.setXYZ(i, p.getX(i) * f, p.getY(i) - 0.02 * (1 - f + 0.5), p.getZ(i) * f);
-      }
+    const y = 0.14 + t * 0.8;
+    const len = 0.16 * Math.pow(1 - t, 0.9) + 0.025;
+    const nb = 7 - Math.floor(t * 3);
+    for (let b = 0; b < nb; b++) {
+      const a = (b / nb) * Math.PI * 2 + k * 0.9 + rndv() * 0.4;
+      const dx = Math.cos(a), dz = Math.sin(a);
+      const droop = 0.25 + rndv() * 0.15;
+      const R = [dx * len / 2, -droop * len / 2, dz * len / 2];
+      const w = len * 0.55;
+      const U = [-dz * w / 2, 0.15 * w / 2, dx * w / 2];
+      cb.card(dx * len / 2, y - droop * len / 2, dz * len / 2, R, U, ATLAS.NEEDLE,
+        (x, yy, z) => norm3(x * 3, 1.0, z * 3),
+        (x, yy, z) => 0.35 + 0.65 * Math.min(1, Math.hypot(x, z) / (len + 0.01)) * (0.75 + 0.35 * t));
     }
-    cone.computeVertexNormals();
-    cone.translate(0, yb + h / 2, 0);
-    parts.push(prep(cone, shadeY(yb - 0.02, yb + h, 0.42 + t * 0.15, 0.95 + t * 0.1), 2));
   }
-  const tip = new THREE.ConeGeometry(0.018, 0.1, 5, 1, true); tip.translate(0, 0.98, 0);
-  parts.push(prep(tip, shadeY(0.93, 1.03, 0.8, 1.05), 2));
+  crossCards(cb, ATLAS.FIR, 0.22, 0.9, 0.1, 3); // dense core so you can't see through
+  parts.push(cb.geometry());
   return mergeGeometries(parts);
 }
 
 function coniferLo() {
-  const c = new THREE.ConeGeometry(0.15, 0.92, 6, 1, true); c.translate(0, 0.1 + 0.46, 0);
-  return prep(c, shadeY(0.1, 1.0, 0.5, 1.0), 2);
+  const cb = new CardBuilder();
+  crossCards(cb, ATLAS.FIR, 0.34, 0.98, 0.04, 3);
+  return cb.geometry();
+}
+
+function trunkWithBranches(h, r0, r1, col) {
+  const parts = [];
+  const tr = new THREE.CylinderGeometry(r1, r0, h, 7, 1, true); tr.translate(0, h / 2, 0);
+  parts.push(barkPart(tr, (c) => c.setRGB(...col)));
+  for (let i = 0; i < 4; i++) {
+    const b = new THREE.CylinderGeometry(0.006, 0.014, 0.28, 5, 1, true);
+    b.translate(0, 0.14, 0); b.rotateZ(0.7 + rndv() * 0.4); b.rotateY(i * 1.6 + rndv());
+    b.translate(0, h * (0.75 + rndv() * 0.2), 0);
+    parts.push(barkPart(b, (c) => c.setRGB(...col)));
+  }
+  return parts;
 }
 
 function mapleHi() {
-  const parts = [];
-  const tr = new THREE.CylinderGeometry(0.022, 0.04, 0.55, 6, 1, true); tr.translate(0, 0.275, 0);
-  parts.push(prep(tr, bark(0.13, 0.09, 0.06), 0));
-  const b1 = new THREE.CylinderGeometry(0.01, 0.018, 0.3, 5, 1, true); b1.rotateZ(0.7); b1.translate(-0.08, 0.5, 0);
-  const b2 = new THREE.CylinderGeometry(0.01, 0.018, 0.28, 5, 1, true); b2.rotateZ(-0.6); b2.rotateY(1.2); b2.translate(0.05, 0.5, 0.06);
-  parts.push(prep(b1, bark(0.13, 0.09, 0.06), 0), prep(b2, bark(0.13, 0.09, 0.06), 0));
-  const blobs = [[0, 0.66, 0, 0.27], [0.17, 0.57, 0.07, 0.2], [-0.15, 0.6, -0.09, 0.21], [0.03, 0.84, 0.02, 0.18], [-0.05, 0.55, 0.16, 0.17]];
-  for (const [x, y, z, r] of blobs) parts.push(prep(blob(x, y, z, r, 1, 1, 0.85, 1), shadeY(y - r, y + r, 0.38, 1.05), 2));
+  const parts = trunkWithBranches(0.55, 0.04, 0.022, [0.32, 0.25, 0.2]);
+  const cb = new CardBuilder();
+  crownCards(cb, ATLAS.MAPLE, 46, [0, 0.66, 0], [0.32, 0.27, 0.32], 0.26);
+  parts.push(cb.geometry());
   return mergeGeometries(parts);
 }
 
 function mapleLo() {
-  return prep(blob(0, 0.66, 0, 0.32, 0, 1, 0.85, 1, 0.08), shadeY(0.4, 0.95, 0.45, 1.0), 2);
+  const cb = new CardBuilder();
+  crossCards(cb, ATLAS.CROWN, 0.78, 0.98, 0.02, 3);
+  return cb.geometry();
 }
 
 function birchHi() {
   const parts = [];
-  const tr = new THREE.CylinderGeometry(0.014, 0.024, 0.8, 6, 12, true); tr.translate(0, 0.4, 0);
-  parts.push(prep(tr, (c, x, y) => {
+  const tr = new THREE.CylinderGeometry(0.013, 0.022, 0.85, 7, 12, true); tr.translate(0, 0.425, 0);
+  parts.push(barkPart(tr, (c, x, y) => {
     const band = hashv(Math.floor(y * 30), 1.3, 2.7);
-    const v = band < 0.28 ? 0.12 : 0.82 + band * 0.12;
+    const v = band < 0.25 ? 0.12 : 0.95;
     c.setRGB(v, v, v * 0.97);
-  }, 0));
-  const blobs = [[0, 0.58, 0, 0.15], [0.05, 0.74, 0.03, 0.15], [-0.04, 0.88, -0.02, 0.12], [0.06, 0.5, -0.07, 0.11]];
-  for (const [x, y, z, r] of blobs) parts.push(prep(blob(x, y, z, r, 1, 0.9, 1.25, 0.9), shadeY(y - r, y + r, 0.42, 1.05), 2));
+  }));
+  const cb = new CardBuilder();
+  crownCards(cb, ATLAS.BIRCH, 34, [0, 0.72, 0], [0.19, 0.27, 0.19], 0.2);
+  parts.push(cb.geometry());
   return mergeGeometries(parts);
 }
 
 function birchLo() {
-  return prep(blob(0, 0.72, 0, 0.2, 0, 0.85, 1.5, 0.85, 0.05), shadeY(0.45, 1.0, 0.5, 1.0), 2);
+  const cb = new CardBuilder();
+  crossCards(cb, ATLAS.CROWN, 0.5, 1.0, 0.02, 3);
+  return cb.geometry();
 }
 
 function shrubGeo() {
-  return mergeGeometries([
-    prep(blob(0, 0.32, 0, 0.5, 1, 1, 0.62, 1, 0.22), shadeY(0.0, 0.6, 0.35, 1.0), 2),
-    prep(blob(0.28, 0.25, 0.1, 0.3, 1, 1, 0.7, 1, 0.22), shadeY(0.0, 0.5, 0.35, 1.0), 2),
-  ]);
+  const cb = new CardBuilder();
+  crownCards(cb, ATLAS.SHRUB, 16, [0, 0.3, 0], [0.55, 0.35, 0.55], 0.5);
+  return cb.geometry();
 }
 
 function rockGeo() {
-  const g = blob(0, 0.12, 0, 0.5, 1, 1, 0.62, 0.85, 0.34);
-  return prep(g, (c, x, y, z) => { const v = 0.75 + hashv(x * 3, y * 3, z * 3) * 0.3; c.setRGB(v, v, v); }, 1);
+  const g = blob(0, 0.12, 0, 0.5, 2, 1, 0.62, 0.85, 0.3);
+  const p = g.attributes.position, uv = new Float32Array(p.count * 2);
+  for (let i = 0; i < p.count; i++) { uv[i * 2] = (p.getX(i) + p.getZ(i)) * 1.5; uv[i * 2 + 1] = p.getY(i) * 1.5 + p.getX(i) * 0.5; }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return prep(g, (c, x, y, z) => { const v = 0.8 + hashv(x * 3, y * 3, z * 3) * 0.25; c.setRGB(v, v, v); }, 1, true);
 }
 
 function tuftGeo() {
@@ -170,6 +276,7 @@ export function makeFoliageMaterial(uniforms, opts = {}) {
         transformed.x += sin(uTime * 1.3 + ph) * sway * ${opts.swayAmp ?? '0.035'};
         transformed.z += cos(uTime * 1.07 + ph * 1.3) * sway * ${opts.swayAmp ?? '0.035'} * 0.7;
         vLocal = position * 26.0 + ip * 0.37;
+        transformed += normal * sin(uTime * 4.0 + dot(position, vec3(37.0, 23.0, 51.0)) + ph) * 0.006 * max(aTint - 1.0, 0.0);
         vTintAmt = min(aTint, 1.0); vLeaf = max(aTint - 1.0, 0.0);`)
       .replace('#include <color_vertex>', `#include <color_vertex>
         vColor.rgb *= mix(vec3(1.0), iTint, min(aTint, 1.0));`);
@@ -181,17 +288,13 @@ export function makeFoliageMaterial(uniforms, opts = {}) {
       .replace('#include <color_fragment>', `#include <color_fragment>
         float spk = vnoise(vLocal) * 0.65 + vnoise(vLocal * 2.7) * 0.35;
         diffuseColor.rgb *= mix(1.0, 0.6 + 0.75 * spk, vLeaf * ${opts.speckle ?? '1.0'} + vTintAmt * (1.0 - vLeaf) * 0.5);
-        #ifdef LEAFY
-        float rim = 1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition)));
-        float lacy = vnoise(vLocal * 2.3);
-        if (vLeaf > 0.5 && lacy < rim * 1.1 - 0.42) discard;
-        #endif`)
+`)
+      .replace('#include <normal_fragment_begin>', opts.cards ? THREE.ShaderChunk.normal_fragment_begin.replace('float faceDirection = gl_FrontFacing ? 1.0 : - 1.0;', 'float faceDirection = 1.0;') : '#include <normal_fragment_begin>')
       .replace('#include <opaque_fragment>', `
         float back = pow(max(dot(normalize(vViewPosition), uSunView), 0.0), 3.0);
         outgoingLight += diffuseColor.rgb * uSunColor * back * 0.55 * vLeaf;
         #include <opaque_fragment>`);
   };
-  if (opts.leafy) mat.defines = { LEAFY: 1 };
   mat.customProgramCacheKey = () => 'foliage-' + (opts.key || 'a');
   return mat;
 }
@@ -201,8 +304,8 @@ const PAL = {
   maple: ['#b0201a', '#d13a1a', '#e2581b', '#ee7d22', '#d99a1e', '#8c1a1f', '#c42a2a', '#f09a2a'],
   birch: ['#e8b51f', '#f1c63c', '#d9a016', '#e9cf5b', '#c99316', '#f4d86a', '#b7a12c'],
   shrub: ['#a11d1b', '#c3331b', '#d55a1c', '#7c1820', '#b37a26', '#e07b2a'],
-  fir: ['#2c4a2a', '#34552d', '#3b5a2f', '#2a4430', '#40603a'],
-  spruce: ['#2a4339', '#2f4a3c', '#25403a', '#345043'],
+  fir: ['#3d6338', '#46703c', '#4f7840', '#3a5c40', '#557f4a'],
+  spruce: ['#3a5a4c', '#41634f', '#34574d', '#476c58'],
 };
 const PALC = {};
 for (const k in PAL) PALC[k] = PAL[k].map(h => new THREE.Color(h));
@@ -222,9 +325,9 @@ export class Vegetation {
       [coniferHi(), coniferLo()], [mapleHi(), mapleLo()], [birchHi(), birchLo()],
       [shrubGeo(), null], [rockGeo(), null], [tuftGeo(), null],
     ];
-    this.matFol = makeFoliageMaterial(uniforms, { key: 'fol', leafy: true });
-    this.matRock = makeFoliageMaterial(uniforms, { key: 'rock', roughness: 0.95, swayAmp: '0.0', speckle: '0.0' });
-    this.matTuft = makeFoliageMaterial(uniforms, { key: 'tuft', map: tex.tuft, alphaTest: 0.42, side: THREE.DoubleSide, swayAmp: '0.12', speckle: '0.0' });
+    this.matFol = makeFoliageMaterial(uniforms, { key: 'fol', map: tex.atlas, alphaTest: 0.42, side: THREE.DoubleSide, cards: true, speckle: '0.25' });
+    this.matRock = makeFoliageMaterial(uniforms, { key: 'rock', roughness: 0.9, swayAmp: '0.0', speckle: '0.0', map: tex.rock });
+    this.matTuft = makeFoliageMaterial(uniforms, { key: 'tuft', map: tex.tuft, alphaTest: 0.42, side: THREE.DoubleSide, swayAmp: '0.12', speckle: '0.0', cards: true });
     this.cullR = { 3: 400, 4: 650, 5: 230 };
     this._m = new THREE.Matrix4(); this._q = new THREE.Quaternion(); this._e = new THREE.Euler();
     this._p = new THREE.Vector3(); this._s = new THREE.Vector3();
