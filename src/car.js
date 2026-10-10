@@ -3,6 +3,8 @@
 // drifts), airborne physics and wall / tree collisions.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { makeRim, makeCaliper, buildKit, buildInterior, makeUnderglow, measureBody } from './carparts.js';
+import { FINISHES, engineTorque, boostTarget } from './spec.js';
 import { FLAG_TUNNEL, FLAG_BRIDGE, ROAD_EDGE, TUBE_HALF } from './road.js';
 
 const G = 9.81;
@@ -146,6 +148,13 @@ export class Car {
     this.wheelSpin = 0; this.ax = 0; this.ay = 0;
     this.impact = 0; this.slip = 0;
     this.paintIndex = 0;
+    this.stripe = { mode: { value: 0 }, color: { value: new THREE.Color(1, 1, 1) }, inv: { value: new THREE.Matrix4() } };
+    this.rideOffset = 0; this.rakeOffset = 0;
+    // drivetrain state
+    this.gear = 1; this.rpm = 950; this.boost = 0; this.shiftT = 0; this.revT = 0;
+    this.nosLeft = 0; this.nosOn = false; this.wheelspin = 0; this.limiterHit = false; this.engineLoad = 0;
+    this.events = { shift: 0, bov: 0, pop: 0 };
+    this.prevThr = 0; this.lockF = false; this.lockR = false;
   }
 
   // Swap the placeholder body for the detailed glTF supercar.
@@ -160,16 +169,27 @@ export class Car {
       gltf = await loader.parseAsync(buf.buffer, '');
     } else gltf = await loader.loadAsync(url);
     const model = gltf.scene;
-    const paint = this.paint = new THREE.MeshPhysicalMaterial({
-      color: PAINTS[this.paintIndex], metalness: 0.65, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.03,
-      envMapIntensity: 1.4,
-    });
-    const chrome = new THREE.MeshPhysicalMaterial({ color: 0xe8e8ea, metalness: 1, roughness: 0.12, envMapIntensity: 1.5 });
-    const rim = new THREE.MeshPhysicalMaterial({ color: 0x47494e, metalness: 1, roughness: 0.3, clearcoat: 0.6, envMapIntensity: 1.3 });
-    const glass = new THREE.MeshPhysicalMaterial({ color: 0x0b0e12, metalness: 0.0, roughness: 0.02, clearcoat: 1, transparent: true, opacity: 0.55, envMapIntensity: 2.2, depthWrite: false });
-    const tire = new THREE.MeshStandardMaterial({ color: 0x111112, roughness: 0.88 });
+    // the model's nose points down -z; the physics drives toward +z
+    const flip = new THREE.Group();
+    flip.rotation.y = Math.PI;
+    flip.add(model);
+    this.M = {
+      paint: new THREE.MeshPhysicalMaterial({ color: 0xb5120e, metalness: 0.15, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.4 }),
+      chrome: new THREE.MeshPhysicalMaterial({ color: 0xe8e8ea, metalness: 1, roughness: 0.12, envMapIntensity: 1.5 }),
+      rim: new THREE.MeshPhysicalMaterial({ color: 0x3a3c41, metalness: 1, roughness: 0.3, clearcoat: 0.6, envMapIntensity: 1.3 }),
+      rimInner: new THREE.MeshStandardMaterial({ color: 0x1a1b1d, metalness: 0.8, roughness: 0.5 }),
+      caliper: new THREE.MeshPhysicalMaterial({ color: 0xd4a017, roughness: 0.35, clearcoat: 1 }),
+      glass: new THREE.MeshPhysicalMaterial({ color: 0x0b0e12, metalness: 0.0, roughness: 0.02, clearcoat: 1, transparent: true, opacity: 0.55, envMapIntensity: 2.2, depthWrite: false }),
+      tire: new THREE.MeshStandardMaterial({ color: 0x111112, roughness: 0.88 }),
+      leather: new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.62 }),
+      accent: new THREE.MeshStandardMaterial({ color: 0xb5120e, roughness: 0.55 }),
+      trim: new THREE.MeshPhysicalMaterial({ color: 0x141518, metalness: 0.3, roughness: 0.3, clearcoat: 1 }),
+      carpet: new THREE.MeshStandardMaterial({ color: 0x1c1c1e, roughness: 0.95 }),
+    };
+    this.paint = this.M.paint;
     this.headMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff2dc, emissiveIntensity: 0.4, roughness: 0.05, metalness: 0.2 });
     this.tailMat = new THREE.MeshStandardMaterial({ color: 0x500000, emissive: 0xff1208, emissiveIntensity: 0.6, roughness: 0.15 });
+    const M = this.M;
     const byName = (n) => model.getObjectByName(n);
     model.traverse((o) => {
       if (!o.isMesh) return;
@@ -177,49 +197,150 @@ export class Car {
       // panels turns into acne, so the car only casts shadows
       o.castShadow = true; o.receiveShadow = false;
       const mn = (o.material?.name || '').toLowerCase();
-      if (mn === 'body_color') o.material = paint;
-      else if (mn === 'metal_chrome') o.material = chrome;
-      else if (mn === 'tires') o.material = tire;
-      else if (mn === 'glass_gray' || mn === 'projector_glass') o.material = glass;
-      else if (mn === 'taillight_glass') o.material = this.tailMat;
-      else if (mn === 'turn_signal_led') o.material = this.headMat;
-      if (o.material && o.material !== glass) { o.material.envMapIntensity = o.material.envMapIntensity ?? 1; }
+      const map = { body_color: M.paint, metal_chrome: M.chrome, tires: M.tire, glass_gray: M.glass, projector_glass: M.glass,
+        taillight_glass: this.tailMat, turn_signal_led: this.headMat, leather: M.leather, leather_red: M.accent, carpet: M.carpet };
+      if (map[mn]) o.material = map[mn];
     });
-    for (const n of ['rim_fl', 'rim_fr', 'rim_rl', 'rim_rr', 'trim']) byName(n)?.traverse(o => { if (o.isMesh) o.material = rim; });
-    byName('glass')?.traverse(o => { if (o.isMesh) { o.material = glass; o.castShadow = false; } });
+    for (const n of ['carbon_fibre_trim', 'carbon_fibre', 'steering_carbon']) byName(n)?.traverse(o => { if (o.isMesh) o.material = M.trim; });
+    for (const n of ['rim_fl', 'rim_fr', 'rim_rl', 'rim_rr']) byName(n)?.traverse(o => { if (o.isMesh) o.material = M.rim; });
+    byName('glass')?.traverse(o => { if (o.isMesh) { o.material = M.glass; o.castShadow = false; } });
     byName('lights')?.traverse(o => { if (o.isMesh) o.material = this.headMat; });
-    byName('lights_red')?.traverse(o => { if (o.isMesh) o.material = this.tailMat; });
-    this.reflective = [paint, chrome, rim, glass, this.headMat];
+    byName('brakes')?.traverse(o => { if (o.isMesh) o.material = this.tailMat; });
+    this.reflective = [M.paint, M.chrome, M.rim, M.glass, this.headMat, M.caliper];
     if (envMap) this.setEnvMap(envMap);
-    // replace body + wheels
     this.body.clear();
     for (const wh of this.wheels) this.root.remove(wh.pivot);
-    this.body.add(model);
-    model.updateMatrixWorld(true);
+    this.body.add(flip);
+    this.root.updateMatrixWorld(true);
+    // wheels: pivot (steer) -> spinner (roll) -> model wheel
     this.wheels = [];
     for (const [n, front] of [['wheel_fl', true], ['wheel_fr', true], ['wheel_rl', false], ['wheel_rr', false]]) {
       const w = byName(n);
       if (!w) continue;
-      const pivot = new THREE.Group();
-      const wp = new THREE.Vector3(); w.getWorldPosition(wp);
-      this.root.worldToLocal(wp);
-      pivot.position.copy(wp);
-      this.root.add(pivot);
-      pivot.updateMatrixWorld(true);
-      pivot.attach(w);
-      this.wheels.push({ pivot, w, front, base: w.rotation.x });
+      const box = new THREE.Box3().setFromObject(w);
+      const c = box.getCenter(new THREE.Vector3());
+      this.root.worldToLocal(c);
+      const pivot = new THREE.Group(); pivot.position.copy(c);
+      const spinner = new THREE.Group();
+      pivot.add(spinner); this.root.add(pivot);
+      this.root.updateMatrixWorld(true);
+      spinner.attach(w);
+      const rim = w.getObjectByName(n.replace('wheel_', 'rim_'));
+      this.wheels.push({ pivot, spinner, w, front, base: c.clone(), side: Math.sign(c.x), stockRim: rim });
     }
-    for (const l of this.lights) l.position.y = 0.68;
+    // steering wheel turns about its column
+    const sw = byName('steering_wheel');
+    if (sw) {
+      const c = new THREE.Box3().setFromObject(sw).getCenter(new THREE.Vector3());
+      const holder = new THREE.Group();
+      sw.parent.worldToLocal(c);
+      holder.position.copy(c);
+      sw.parent.add(holder);
+      holder.updateMatrixWorld(true);
+      holder.attach(sw);
+      this.steeringWheel = holder;
+      this.steerAxis = new THREE.Vector3(0, 0.42, 1).normalize();
+    }
+    const bodyMesh = byName('body');
+    this.fit = measureBody(bodyMesh || model, this.wheels.map(w => ({ x: w.base.x, y: w.base.y, z: w.base.z, front: w.front })));
+    this.kit = new THREE.Group(); this.root.add(this.kit);
+    this.interior = new THREE.Group(); this.body.add(this.interior);
+    this.extras = new THREE.Group(); this.body.add(this.extras);
+    for (const l of this.lights) l.position.set(l.position.x, 0.68, 2.2);
     this.isModel = true;
+    if (this.build) this.applyBuild(this.build, this.spec);
   }
 
   setEnvMap(tex) {
     for (const m of this.reflective || [this.paint]) { m.envMap = tex; m.needsUpdate = true; }
   }
 
-  nextPaint() { this.paintIndex = (this.paintIndex + 1) % PAINTS.length; this.paint.color.setHex(PAINTS[this.paintIndex]); }
+  // Visual side of a build: paint, wheels, kit, interior, lights, stance.
+  applyBuild(build, spec) {
+    this.build = build; this.spec = spec;
+    if (!this.isModel) return;
+    const L = build.look, M = this.M;
+    const F = FINISHES[L.finish] || FINISHES.gloss;
+    M.paint.color.set(L.paint);
+    M.paint.metalness = F.metalness; M.paint.roughness = F.roughness;
+    M.paint.clearcoat = F.clearcoat; M.paint.clearcoatRoughness = F.clearcoatRoughness;
+    M.paint.iridescence = F.iridescence || 0; M.paint.iridescenceIOR = 1.6;
+    this.stripe.mode.value = ['none', 'dual', 'center', 'side', 'twotone'].indexOf(L.stripes);
+    this.stripe.color.value.set(L.stripeColor);
+    if (!this.stripePatched) this._patchStripes(M.paint);
+    M.rim.color.set(L.rimColor);
+    M.rim.metalness = L.rimFinish === 'gloss' ? 0.2 : 1; M.rim.roughness = L.rimFinish === 'matte' ? 0.6 : L.rimFinish === 'gloss' ? 0.25 : 0.28;
+    M.caliper.color.set(L.caliper);
+    M.glass.opacity = 0.35 + L.tint * 0.55;
+    M.leather.color.set(L.leather); M.accent.color.set(L.accent); M.carpet.color.set(L.carpet);
+    M.trim.color.set(L.carbonTrim ? 0x141518 : L.leather);
+    this.headMat.emissive.set(L.headlight);
+    for (const l of this.lights) l.color.set(L.headlight);
+    this.tailMat.color.set(L.smokedTails ? 0x120202 : 0x500000);
+    // wheels: replace stock rims with a procedural design
+    const rimScale = 1 + (L.rimSize - 20) * 0.04;
+    const track = (L.spacers + (L.widebody ? 50 : 0)) / 1000;
+    for (const wh of this.wheels) {
+      if (wh.custom) { wh.spinner.remove(wh.custom); wh.custom = null; }
+      if (wh.caliper) { wh.pivot.remove(wh.caliper); wh.caliper = null; }
+      const useStock = L.rim === 'stock';
+      if (wh.stockRim) wh.stockRim.visible = useStock;
+      if (!useStock) {
+        const r = makeRim(L.rim, 0.27 * rimScale, 0.22, M.rim, M.rimInner);
+        if (wh.side < 0) r.rotation.y = Math.PI; // face outward
+        wh.spinner.add(r); wh.custom = r;
+      }
+      const cal = makeCaliper(M.caliper, 0.27 * Math.min(1, rimScale));
+      cal.position.x = wh.side * -0.02;
+      if (wh.side < 0) cal.rotation.y = Math.PI;
+      if (!wh.front) cal.rotation.x = Math.PI * 0.85;
+      wh.pivot.add(cal); wh.caliper = cal;
+      wh.pivot.position.x = wh.base.x + wh.side * track;
+      wh.pivot.rotation.z = wh.side * (L.camberLook || 0) * Math.PI / 180;
+    }
+    // ride height: body sits lower/higher; wheels stay on the ground
+    this.rideOffset = ((spec.rideF + spec.rideR) / 2) + L.ride / 1000;
+    this.rakeOffset = (spec.rideR - spec.rideF) / 2.65;
+    // kit + interior
+    this.kit.clear(); this.interior.clear(); this.extras.clear();
+    this.kit.add(buildKit(L, build.parts, this.fit));
+    this.interior.add(buildInterior(L, spec.cage, this.fit, M.leather));
+    if (L.underglow !== 'none') this.extras.add(makeUnderglow(L.underglow));
+    this.kit.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    this.onLook?.();
+  }
 
-  place(x, z, th, y) { this.x = x; this.z = z; this.th = th; this.y = y; this.vy = 0; this.vx = 0; this.vyl = 0; this.w = 0; this.steer = 0; }
+  _patchStripes(mat) {
+    this.stripePatched = true;
+    const U = this.stripe;
+    const prev = mat.onBeforeCompile;
+    mat.onBeforeCompile = (sh, r) => {
+      if (prev) prev.call(mat, sh, r);
+      sh.uniforms.uStripeMode = U.mode; sh.uniforms.uStripeCol = U.color; sh.uniforms.uCarInv = U.inv;
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nuniform mat4 uCarInv; varying vec3 vCarPos; varying vec3 vCarNrm;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCarPos = (uCarInv * modelMatrix * vec4(position, 1.0)).xyz; vCarNrm = normalize(mat3(uCarInv * modelMatrix) * normal);');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform int uStripeMode; uniform vec3 uStripeCol; varying vec3 vCarPos; varying vec3 vCarNrm;')
+        .replace('#include <color_fragment>', `#include <color_fragment>
+          float st = 0.0; vec3 cp = vCarPos;
+          float topF = smoothstep(0.25, 0.5, vCarNrm.y);
+          if (uStripeMode == 1) st = (step(0.07, abs(cp.x)) - step(0.25, abs(cp.x))) * topF;
+          if (uStripeMode == 2) st = (1.0 - step(0.2, abs(cp.x))) * topF;
+          if (uStripeMode == 3) st = (step(0.48, cp.y) - step(0.56, cp.y)) * smoothstep(0.5, 0.8, abs(vCarNrm.x));
+          if (uStripeMode == 4) st = step(0.86, cp.y);
+          diffuseColor.rgb = mix(diffuseColor.rgb, uStripeCol, st);`);
+    };
+    const pk = mat.customProgramCacheKey;
+    mat.customProgramCacheKey = () => (pk ? pk.call(mat) : '') + '|stripes';
+    mat.needsUpdate = true;
+  }
+
+  nextPaint() {
+    this.paintIndex = (this.paintIndex + 1) % PAINTS.length;
+    if (this.build) { this.build.look.paint = '#' + new THREE.Color(PAINTS[this.paintIndex]).getHexString(); this.applyBuild(this.build, this.spec); }
+    else this.paint.color.setHex(PAINTS[this.paintIndex]);
+  }
+
+  place(x, z, th, y) { this.x = x; this.z = z; this.th = th; this.y = y; this.vy = 0; this.vx = 0; this.vyl = 0; this.w = 0; this.steer = 0; this.gear = 1; this.rpm = this.spec ? this.spec.idle : 950; this.boost = 0; this.wheelspin = 0; }
 
   setHeadlights(on, k = 1) {
     for (const l of this.lights) l.intensity = on ? 900 * k : 0;
@@ -245,32 +366,114 @@ export class Car {
   }
 
   _step(dt, input, world) {
-    const m = 1450, I = 2300, a = 1.25, b = 1.45, L = a + b, hcg = 0.55;
+    const S = this.spec;
+    const m = S.mass, I = m * 1.6, L = 2.65, a = L * (1 - S.frontWeight), b = L * S.frontWeight, hcg = S.cgH;
     const sp = Math.abs(this.vx);
     const q = world.road.query(this.x, this.z, this.y);
     const onRoad = !!(q && q.d < ROAD_EDGE + 0.4 && Math.abs(this.y - q.y) < 1.5);
     this.onRoad = onRoad;
     this.surface = onRoad ? 'road' : 'dirt';
-    const mu = onRoad ? 1.25 : 0.72;
+    const surf = onRoad ? 1 : S.offMu / S.mu;
+    const rho = 1.225, v2 = this.vx * this.vx;
+    const downF = this.air ? 0 : 0.5 * rho * v2 * S.clF, downR = this.air ? 0 : 0.5 * rho * v2 * S.clR;
 
     // steering
-    const maxSteer = 0.6 / (1 + sp / 13);
+    const maxSteer = 0.6 * S.steerLock / (1 + sp / 13);
     const target = input.steer * maxSteer;
-    const rate = Math.abs(target) > Math.abs(this.steer) ? 3.2 : 5.5;
+    const rate = (Math.abs(target) > Math.abs(this.steer) ? 3.2 : 5.5) * (1 + S.resp);
     this.steer += (target - this.steer) * Math.min(1, dt * rate);
     const d = this.steer;
 
-    // longitudinal
-    let Fx = 0;
-    const thr = input.throttle, brk = input.brake;
-    if (thr > 0) Fx += thr * Math.min(13500, 330000 / Math.max(sp, 1)) * (this.vx < -0.5 ? 0 : 1);
-    if (brk > 0) {
-      if (this.vx > 0.5) Fx -= brk * 19000;
-      else if (this.vx > -9) Fx -= brk * 5200; // reverse
+    // ---------------- drivetrain
+    const n = S.gears.length;
+    let thr = input.throttle, brk = input.brake;
+    // reverse: hold brake at a standstill
+    if (this.gear > 0 && this.vx < 0.4 && brk > 0 && thr === 0) { this.revT += dt; if (this.revT > 0.35) { this.gear = -1; this.revT = 0; } }
+    else if (this.gear < 0 && thr > 0 && this.vx > -0.4) this.gear = 1;
+    else this.revT = 0;
+    const rev = this.gear < 0;
+    if (rev) { const t = thr; thr = brk; brk = t; }
+    const ratio = (rev ? 2.9 : S.gears[Math.min(n, this.gear) - 1]) * S.final;
+    const wheelRpm = Math.abs(this.vx) / S.wheelR * 9.549;
+    const geared = wheelRpm * ratio;
+    // clutch slips at low speed so the engine can rev for a launch
+    const slipRpm = thr > 0.05 ? S.idle + (S.launch - S.idle) * Math.min(1, thr * 1.2) : S.idle;
+    let rpmT = Math.max(geared, geared < slipRpm ? slipRpm : 0, S.idle);
+    // traction control & wheelspin raise rpm above road speed
+    rpmT += this.wheelspin * 2200;
+    const inertia = 0.12 * S.inertia;
+    this.rpm += (rpmT - this.rpm) * Math.min(1, dt / Math.max(0.02, geared >= slipRpm && this.wheelspin < 0.1 ? 0.02 : inertia));
+    this.limiterHit = this.rpm >= S.limiter - 20;
+    if (this.limiterHit) this.rpm = S.limiter - 60 * Math.random();
+    // shifting
+    if (this.shiftT > 0) this.shiftT -= dt;
+    if (!rev && this.shiftT <= 0) {
+      const manual = S.assists.gearbox === 'manual';
+      const nextRpm = this.gear < n ? geared / S.gears[this.gear - 1] * S.gears[this.gear] : 0;
+      const up = manual ? input.shiftUp : ((this.rpm > S.limiter * 0.965 && thr > 0.2) || (thr < 0.35 && brk === 0 && this.rpm > S.limiter * 0.42 && nextRpm > S.limiter * 0.25));
+      const downRpm = this.gear > 1 ? geared / S.gears[this.gear - 1] * S.gears[this.gear - 2] : 1e9;
+      const down = manual ? input.shiftDown : (this.gear > 1 && (
+        (brk > 0.2 && this.rpm < S.limiter * 0.55 && downRpm < S.limiter * 0.85) ||
+        (thr < 0.35 && this.rpm < S.limiter * 0.2) ||
+        (thr >= 0.35 && this.rpm < S.limiter * 0.38 && downRpm < S.limiter * 0.8) ||
+        (thr > 0.9 && downRpm < S.limiter * 0.78 && this.rpm < S.limiter * 0.55)));
+      if (up && this.gear < n) { this.gear++; this.shiftT = S.shift; this.events.shift = 1; if (thr > 0.5) this.events.pop = 1; }
+      else if (down && this.gear > 1) { this.gear--; this.shiftT = S.shift * 0.8; this.events.shift = -1; this.rpm = Math.min(S.limiter, downRpm); }
     }
-    if (thr > 0 && this.vx < -0.5) Fx += thr * 15500;
-    Fx -= 0.42 * this.vx * Math.abs(this.vx) + (onRoad ? 14 : 160) * this.vx;
-    if (input.handbrake && Math.abs(this.vx) > 0.2) Fx -= Math.sign(this.vx) * 3800;
+    input.shiftUp = input.shiftDown = false;
+    // boost
+    const bT = boostTarget(S, this.rpm, thr);
+    const spool = S.boost === 'turboBig' ? 1.1 : S.boost === 'turbo' ? 1.9 : 18;
+    this.boost += (bT - this.boost) * Math.min(1, dt * (bT > this.boost ? spool : 6));
+    if (this.prevThr > 0.6 && thr < 0.2 && this.boost > 0.3 && S.boost.startsWith?.('turbo')) this.events.bov = this.boost;
+    if (this.prevThr > 0.6 && thr < 0.15 && this.rpm > 4500) this.events.pop = Math.max(this.events.pop, 0.7);
+    this.prevThr = thr;
+    // nitrous
+    this.nosOn = !!(input.nos && S.nos && this.nosLeft > 0 && thr > 0.5 && !rev);
+    if (this.nosOn) this.nosLeft = Math.max(0, this.nosLeft - dt);
+    else if (S.nosCap) this.nosLeft = Math.min(S.nosCap, this.nosLeft + dt * 0.04);
+    // engine torque
+    let T = this.limiterHit || this.shiftT > 0 ? 0 : engineTorque(S, this.rpm, this.boost) * thr;
+    if (this.nosOn) T += S.nos * 745.7 / (this.rpm * Math.PI / 30);
+    const engBrake = (1 - thr) * (25 + this.rpm * 0.011) * (this.shiftT > 0 ? 0 : 1);
+    this.engineLoad = thr;
+    let Fdrive = (T - (geared >= S.idle * 0.9 ? engBrake : 0)) * ratio * S.eff / S.wheelR * (rev ? -1 : 1);
+
+    // ---------------- loads
+    const dN = m * this.ax * hcg / L;
+    const Nf = Math.max(0, m * G * S.frontWeight + downF - dN), Nr = Math.max(0, m * G * (1 - S.frontWeight) + downR + dN);
+    const muF = S.muF * surf, muRb = S.muR * surf;
+    // open diffs lose drive on the unloaded inside wheel in corners
+    const latLoad = Math.min(1, Math.abs(this.ay) / (G * 1.2));
+    const diffK = 1 - (1 - S.diffAccel) * 0.35 * latLoad;
+    // rear traction circle shared with cornering
+    const FrMax = muRb * Nr;
+    let tc = 1;
+    if (Math.abs(Fdrive) > FrMax * diffK && thr > 0) {
+      if (S.assists.tc > 0) { tc = FrMax * diffK / Math.abs(Fdrive) * (S.assists.tc > 1 ? 0.95 : 1.02); Fdrive *= tc; this.wheelspin += (0 - this.wheelspin) * Math.min(1, dt * 8); }
+      else {
+        const excess = Math.abs(Fdrive) / (FrMax * diffK) - 1;
+        this.wheelspin += (Math.min(1, excess) - this.wheelspin) * Math.min(1, dt * 6);
+        Fdrive = Math.sign(Fdrive) * FrMax * diffK * 0.92;
+      }
+    } else this.wheelspin += (0 - this.wheelspin) * Math.min(1, dt * 5);
+    // brakes
+    let FbF = 0, FbR = 0;
+    this.lockF = this.lockR = false;
+    if (brk > 0 && Math.abs(this.vx) > 0.3) {
+      const Fb = brk * S.brakeForce;
+      FbF = Fb * S.brakeBias; FbR = Fb * (1 - S.brakeBias);
+      if (S.assists.abs) { FbF = Math.min(FbF, muF * Nf * 0.98); FbR = Math.min(FbR, muRb * Nr * 0.98); }
+      else {
+        if (FbF > muF * Nf) { FbF = muF * Nf * 0.8; this.lockF = true; }
+        if (FbR > muRb * Nr) { FbR = muRb * Nr * 0.8; this.lockR = true; }
+      }
+    }
+    if (input.handbrake && Math.abs(this.vx) > 0.2) { FbR = Math.max(FbR, muRb * Nr * 0.75); this.lockR = true; }
+    const sgn = Math.sign(this.vx);
+    let Fx = Fdrive - (FbF + FbR) * sgn;
+    Fx -= 0.5 * rho * S.CdA * this.vx * Math.abs(this.vx);
+    Fx -= (onRoad ? 0.013 : 0.06) * m * G * Math.max(-1, Math.min(1, this.vx / 1.5));
 
     // slope
     const fx = Math.cos(this.th), fz = Math.sin(this.th);
@@ -288,26 +491,29 @@ export class Car {
       }
     }
 
-    // load transfer
-    const dN = m * this.ax * hcg / L;
-    const Nf = Math.max(0, m * G * b / L - dN), Nr = Math.max(0, m * G * a / L + dN);
+    // ---------------- tyres (lateral), friction circle
     const vxs = Math.max(Math.abs(this.vx), 1.5);
-    let af = Math.atan2(this.vyl + a * this.w, vxs) - d * Math.sign(this.vx || 1);
-    let ar = Math.atan2(this.vyl - b * this.w, vxs);
-    const Cf = 95000, Cr = 108000;
-    const muR = input.handbrake ? mu * 0.55 : mu;
-    let Fyf = Math.max(-mu * Nf, Math.min(mu * Nf, -Cf * af));
-    let Fyr = Math.max(-muR * Nr, Math.min(muR * Nr, -Cr * ar));
-    this.slip = Math.max(Math.abs(Fyr) / (muR * Nr + 1) * Math.min(1, sp / 8) * (Math.abs(ar) > 0.12 ? 1 : 0.2), input.handbrake && sp > 5 ? 0.8 : 0);
+    const af = Math.atan2(this.vyl + a * this.w, vxs) - d * Math.sign(this.vx || 1);
+    const ar = Math.atan2(this.vyl - b * this.w, vxs);
+    const Nf0 = m * G * S.frontWeight, Nr0 = m * G * (1 - S.frontWeight);
+    const Cf = S.csF * Math.pow(Math.max(0.2, Nf / Nf0), 0.8), Cr = S.csR * Math.pow(Math.max(0.2, Nr / Nr0), 0.8);
+    const fLatF = this.lockF ? 0.35 : Math.sqrt(Math.max(0, 1 - (FbF / (muF * Nf + 1)) ** 2));
+    const usedR = Math.abs(Fdrive) + FbR;
+    const fLatR = this.lockR ? (input.handbrake ? 0.5 : 0.35) : Math.sqrt(Math.max(0.05, 1 - (usedR / (muRb * Nr + 1)) ** 2)) * (1 - this.wheelspin * 0.5);
+    let Fyf = Math.max(-muF * Nf * fLatF, Math.min(muF * Nf * fLatF, -Cf * af));
+    let Fyr = Math.max(-muRb * Nr * fLatR, Math.min(muRb * Nr * fLatR, -Cr * ar));
+    this.slip = Math.max(Math.abs(Fyr) / (muRb * Nr * fLatR + 1) * Math.min(1, sp / 8) * (Math.abs(ar) > 0.1 ? 1 : 0.2),
+      Math.abs(Fyf) / (muF * Nf + 1) * Math.min(1, sp / 8) * (Math.abs(af) > 0.14 ? 0.8 : 0), this.wheelspin, this.lockF || this.lockR ? Math.min(1, sp / 6) : 0);
     if (this.air) { Fyf = 0; Fyr = 0; Fx *= 0.05; }
 
     let ax = (Fx - Fyf * Math.sin(d)) / m + this.vyl * this.w;
     let ay = (Fyr + Fyf * Math.cos(d)) / m - this.vx * this.w - G * latSlope / Math.sqrt(1 + latSlope * latSlope);
     let dw = (a * Fyf * Math.cos(d) - b * Fyr) / I;
+    // locked diff pushes the nose wide under power / tightens on lift
+    if (!this.air && sp > 4) dw += Math.sign(this.w) * Math.min(1, Math.abs(this.w) * 3) * (S.diffAccel * thr * Math.abs(Fdrive) * 0.18 - S.diffDecel * (1 - thr) * 600) / I;
     this.vx += ax * dt;
     this.vyl += ay * dt;
     this.w += dw * dt;
-    // low-speed blend toward kinematic steering to avoid jitter
     const kin = 1 - Math.min(1, sp / 4);
     if (!this.air && kin > 0) {
       const wk = this.vx * Math.tan(d) / L;
@@ -315,12 +521,12 @@ export class Car {
       this.vyl *= 1 - kin * Math.min(1, dt * 10);
     }
     if (this.air) this.w *= 1 - dt * 0.5;
-    // gentle stability control: cap yaw rate near what the tyres can hold
-    else if (!input.handbrake && sp > 6) {
-      const wMax = mu * G / sp * 1.2;
+    else if (S.assists.sc && !input.handbrake && sp > 6) {
+      const wMax = (muF + muRb) / 2 * G / sp * 1.2;
       if (Math.abs(this.w) > wMax) this.w += (Math.sign(this.w) * wMax - this.w) * Math.min(1, dt * 3);
     }
     if (Math.abs(this.vx) < 0.05 && thr === 0 && brk === 0) this.vx = 0;
+    if (brk > 0 && !rev && this.vx < 0.3 && this.vx > -0.3 && input.throttle === 0) this.vx *= 0.5;
     this.ax = ax; this.ay = ay + this.vx * this.w;
 
     this.th += this.w * dt;
@@ -408,17 +614,24 @@ export class Car {
     const k = Math.min(1, dt * 12);
     this.pitch += (pitch - this.pitch) * k;
     this.roll += (roll - this.roll) * k;
-    this.bodyPitch += (-this.ax * 0.007 - this.bodyPitch) * Math.min(1, dt * 6);
-    this.bodyRoll += (-this.ay * 0.009 - this.bodyRoll) * Math.min(1, dt * 6);
+    const rk = this.spec ? this.spec.rollK : 1, dk = this.spec ? 6 * this.spec.damp : 6;
+    this.bodyPitch += (-this.ax * 0.005 * rk - this.bodyPitch) * Math.min(1, dt * dk);
+    this.bodyRoll += (-this.ay * 0.007 * rk - this.bodyRoll) * Math.min(1, dt * dk);
     this.root.position.set(this.x, this.y, this.z);
     // local +z = forward; yaw so that +z maps to (cos th, sin th)
     const e = new THREE.Euler(-this.pitch, Math.PI / 2 - this.th, -this.roll, 'YXZ');
     this.root.quaternion.setFromEuler(e);
-    this.body.rotation.set(this.bodyPitch, 0, this.bodyRoll);
+    this.body.rotation.set(this.bodyPitch + (this.rakeOffset || 0), 0, this.bodyRoll);
+    this.body.position.y = this.rideOffset || 0;
+    if (this.steeringWheel) this.steeringWheel.quaternion.setFromAxisAngle(this.steerAxis, -this.steer * 13);
+    if (this.stripePatched) { this.body.updateMatrixWorld(true); this.stripe.inv.value.copy(this.body.matrixWorld).invert(); }
     this.wheelSpin += (this.vx / 0.36) * dt;
+    const spinRate = this.vx / 0.343 + (this.wheelspin * 40);
+    this.wheelSpin += (spinRate - this.vx / 0.343) * dt;
     for (const wh of this.wheels) {
       wh.pivot.rotation.y = wh.front ? -this.steer : 0;
-      wh.w.rotation.x = (wh.base || 0) + this.wheelSpin;
+      if (wh.spinner) wh.spinner.rotation.x = this.lockF && wh.front ? wh.spinner.rotation.x : (!wh.front && this.lockR ? wh.spinner.rotation.x : this.wheelSpin);
+      else wh.w.rotation.x = this.wheelSpin;
     }
     this.impact *= Math.max(0, 1 - dt * 3);
   }

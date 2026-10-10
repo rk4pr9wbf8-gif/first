@@ -16,6 +16,9 @@ import { Atmosphere, PRESETS } from './atmosphere.js';
 import { makeWater, makeLeaves } from './effects.js';
 import { Car } from './car.js';
 import { CarAudio } from './audio.js';
+import { Nature } from './nature.js';
+import { loadBuild, buildSpec } from './spec.js';
+import { Garage } from './garage.js';
 
 const $ = (id) => document.getElementById(id);
 const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
@@ -28,7 +31,7 @@ const QUALITY = [
   { name: 'High', pr: Math.min(DPR, 1.5), shadows: true, shadowSize: 2048, post: true, veg: 980, hiR: 330, dens: 1.0, terrainR: 15000, leaves: 900, minLeaf: 64, rt: true, cube: true, ao: false },
   { name: 'Ultra', pr: DPR, shadows: true, shadowSize: 4096, post: true, veg: 1300, hiR: 440, dens: 1.3, terrainR: 18000, leaves: 900, minLeaf: 32, rt: true, cube: true, ao: true },
 ];
-const CAMS = ['Chase', 'Far chase', 'Bumper', 'Roadside', 'Drone'];
+const CAMS = ['Chase', 'Far chase', 'Cockpit', 'Bumper', 'Roadside', 'Drone'];
 const START_IDX = 360;
 const AHEAD = 2600;
 
@@ -91,7 +94,7 @@ function setupPost() {
 }
 
 // ------------------------------------------------------------------ world
-let tex, nrm, heightField, cubeRT, cubeCam, cubeFace = 0, road, ground, terrain, veg, roadMesh, atm, water, leaves, car, world;
+let build, garage, nature, tex, nrm, heightField, cubeRT, cubeCam, cubeFace = 0, road, ground, terrain, veg, roadMesh, atm, water, leaves, car, world;
 const audio = new CarAudio();
 const envMats = [];
 const tunnelLights = [];
@@ -154,6 +157,9 @@ async function init() {
   patchMaterial(water.mesh.material, { steps: 16 });
   leaves = makeLeaves(scene, tex, uniforms, 900);
   car = new Car(scene);
+  build = loadBuild();
+  applyBuildAll(build);
+  car.nosLeft = car.spec.nosCap;
   car.root.traverse(o => { if (o.isMesh && !o.material.userData.rt) { o.material.userData.rt = 1; patchMaterial(o.material, { steps: 12, ao: true }); } });
   cubeRT = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType });
   cubeCam = new THREE.CubeCamera(0.5, 1500, cubeRT);
@@ -216,6 +222,35 @@ async function init() {
   if (saved.started) begin();
 }
 
+function applyBuildAll(b) {
+  const spec = buildSpec(b);
+  car.spec = spec;
+  car.applyBuild(b, spec);
+  car.nosLeft = Math.min(car.nosLeft || 0, spec.nosCap);
+  if (!car.nosLeft && spec.nosCap) car.nosLeft = spec.nosCap;
+  audio.setSound(spec.sound);
+  updateGauges();
+}
+
+function updateGauges() {
+  if (!car?.spec) return;
+  $('boost-gauge').hidden = !car.spec.boostMax;
+  $('nos-gauge').hidden = !car.spec.nos;
+  $('t-nos').hidden = !car.spec.nos;
+}
+
+function openGarage() {
+  if (!garage) {
+    garage = new Garage(renderer, car, build, (b) => applyBuildAll(b));
+    garage.onExit = () => { car.setEnvMap(Q.cube ? cubeRT.texture : null); cubeFresh = true; $('hud').hidden = !started; snapCamera(); };
+  }
+  garage.resize();
+  $('hud').hidden = true;
+  $('help').hidden = true;
+  garage.enter();
+  garage.focus(garage.tab);
+}
+
 // first sample at or after i with plain road around it (no tunnel/bridge)
 function openRoadNear(i) {
   for (let k = i; k < road.nFinal - 100; k++) {
@@ -245,6 +280,10 @@ window.__alcan = {
   teleport: (i) => { teleport(i); warm(); }, warm, openRoadNear: (i) => openRoadNear(i),
   setCam: (m) => { camMode = m; cine = null; freeCam = null; snapCamera(); },
   rt: (v) => { RT.uRTOn.value = v; },
+  garage: (tab, mutate) => { openGarage(); if (mutate) { mutate(build); applyBuildAll(build); } if (tab) { garage.tab = tab; garage.render(); garage.cam.position.set(...(garage.constructor.CAMS?.[tab] || [5.6, 1.9, 6.4])); garage.focus(tab); garage.cam.position.copy(garage.camGoal); } },
+  build: () => build,
+  audio: () => ({ ready: audio.ready, worklet: !!audio.engine, nature: !!nature, state: audio.ctx?.state }),
+  gcam: (p) => { garage.camGoal = null; garage.cam.position.set(p[0], p[1], p[2]); garage.controls.target.set(p[3] ?? 0, p[4] ?? 0.55, p[5] ?? 0); },
   free: (x, y, z, lx, ly, lz) => { freeCam = [x, y, z, lx, ly, lz]; },
   info: () => ({ ...stats, geos: renderer.info.memory.geometries, progs: renderer.info.programs.length }),
   setPreset: (p) => { atm.presetIndex = p; atm.apply(PRESETS[p]); },
@@ -257,6 +296,7 @@ window.__alcan = {
 
 let reflectorMat;
 let stats = {};
+let revving = false, waterT = 0, nearWater = 0;
 let cubeFresh = true;
 let autoQDone = new URLSearchParams(location.search).has('q'), autoQT = -2, autoQN = 0;
 let ready = false, started = false;
@@ -290,7 +330,7 @@ function applyQuality() {
 // ------------------------------------------------------------------ input
 const keys = new Set();
 const input = { steer: 0, throttle: 0, brake: 0, handbrake: false };
-const touch = { left: false, right: false, gas: false, brake: false };
+const touch = { left: false, right: false, gas: false, brake: false, nos: false };
 addEventListener('keydown', (e) => {
   if (e.repeat) return;
   keys.add(e.code);
@@ -303,6 +343,9 @@ addEventListener('keydown', (e) => {
     case 'KeyM': toast(audio.toggleMute() ? 'Sound off' : 'Sound on'); break;
     case 'KeyQ': autoQDone = true; qi = (qi + 1) % QUALITY.length; applyQuality(); toast('Quality: ' + QUALITY[qi].name); break;
     case 'KeyP': car.nextPaint(); break;
+    case 'KeyG': if (garage?.open) garage.exit(); else openGarage(); break;
+    case 'KeyE': input.shiftUp = true; break;
+    case 'KeyZ': input.shiftDown = true; break;
     case 'KeyO': autopilot = !autopilot; toast(autopilot ? 'Scenic autopilot: steer or brake to take over' : 'Autopilot off'); break;
     case 'KeyU': metric = !metric; break;
     case 'Slash': case 'F1': $('help').hidden = !$('help').hidden; break;
@@ -324,7 +367,7 @@ addEventListener('pointermove', (e) => {
 renderer.domElement.addEventListener('wheel', (e) => { zoom = Math.max(0.6, Math.min(2.2, zoom * (1 + Math.sign(e.deltaY) * 0.08))); }, { passive: true });
 let zoom = 1;
 
-for (const [id, k] of [['t-left', 'left'], ['t-right', 'right'], ['t-gas', 'gas'], ['t-brake', 'brake']]) {
+for (const [id, k] of [['t-left', 'left'], ['t-right', 'right'], ['t-gas', 'gas'], ['t-brake', 'brake'], ['t-nos', 'nos']]) {
   const el = $(id);
   el.addEventListener('pointerdown', (e) => { touch[k] = true; el.setPointerCapture(e.pointerId); el.classList.add('on'); e.preventDefault(); });
   const off = () => { touch[k] = false; el.classList.remove('on'); };
@@ -332,6 +375,11 @@ for (const [id, k] of [['t-left', 'left'], ['t-right', 'right'], ['t-gas', 'gas'
 }
 $('t-cam').addEventListener('click', () => cycleCam());
 $('t-time').addEventListener('click', () => toast(atm.next()));
+$('t-garage').addEventListener('click', () => openGarage());
+$('hud-garage').addEventListener('click', () => openGarage());
+$('title-garage').addEventListener('click', () => { begin(); openGarage(); });
+$('rev').addEventListener('pointerdown', () => { revving = true; });
+addEventListener('pointerup', () => { revving = false; });
 $('t-auto').addEventListener('click', () => { autopilot = !autopilot; toast(autopilot ? 'Scenic autopilot on' : 'Autopilot off'); });
 
 let padPrev = [];
@@ -342,6 +390,7 @@ function readInput(dt) {
   if (keys.has('ArrowUp') || keys.has('KeyW') || touch.gas) th = 1;
   if (keys.has('ArrowDown') || keys.has('KeyS') || touch.brake) br = 1;
   if (keys.has('Space')) hb = true;
+  input.nos = keys.has('KeyN') || touch.nos;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   for (const p of pads) {
     if (!p) continue;
@@ -431,6 +480,7 @@ function updateCamera(dt, snap = false) {
   const fx = Math.cos(car.th), fz = Math.sin(car.th);
   let dh = car.th - camHeading; dh = Math.atan2(Math.sin(dh), Math.cos(dh));
   camHeading += dh * (snap ? 1 : Math.min(1, dt * 3.2));
+  if (camMode === 2) { orbitYaw = 0; orbitPitch = 0; }
   if (!dragging && performance.now() - lastDrag > 1500) { orbitYaw *= 1 - Math.min(1, dt * 2); orbitPitch *= 1 - Math.min(1, dt * 2); }
   const speed = Math.abs(car.vx);
   let fov = 62;
@@ -442,16 +492,23 @@ function updateCamera(dt, snap = false) {
     want.set(car.x + Math.cos(a) * 34, car.y + 11, car.z + Math.sin(a) * 34);
     look.set(car.x + fx * 6, car.y + 3, car.z + fz * 6);
     fov = 50; lerpK = 1000;
-  } else if (camMode === 0 || camMode === 1 || camMode === 4) {
+  } else if (camMode === 0 || camMode === 1 || camMode === 5) {
     const portrait = camera.aspect < 1 ? 1.55 : 1;
-    const dist = (camMode === 0 ? 7.0 : camMode === 1 ? 12.5 : 42) * zoom * portrait + speed * (camMode === 4 ? 0.2 : 0.035);
+    const dist = (camMode === 0 ? 7.0 : camMode === 1 ? 12.5 : 42) * zoom * portrait + speed * (camMode === 5 ? 0.2 : 0.035);
     const hgt = (camMode === 0 ? 2.25 : camMode === 1 ? 4.0 : 24) * zoom * (portrait > 1 ? 1.3 : 1) + orbitPitch * dist * 0.8;
     const h = camHeading + orbitYaw;
     want.set(car.x - Math.cos(h) * dist, car.y + hgt, car.z - Math.sin(h) * dist);
     look.set(car.x + fx * 4, car.y + 1.1, car.z + fz * 4);
-    fov = camMode === 4 ? 55 : 62 + Math.min(14, speed * 0.22);
-    lerpK = camMode === 4 ? 3 : 10;
+    fov = camMode === 5 ? 55 : 62 + Math.min(14, speed * 0.22);
+    lerpK = camMode === 5 ? 3 : 10;
   } else if (camMode === 2) {
+    // driver's eye: in the car's own frame, so it pitches and rolls with it
+    car.root.updateMatrixWorld(true);
+    want.set(0.36, 1.1, -0.3); car.body.localToWorld(want);
+    look.set(0.36, 0.95, 20); car.body.localToWorld(look);
+    fov = 72 + Math.min(8, speed * 0.1);
+    lerpK = 1000;
+  } else if (camMode === 3) {
     const c = Math.cos(car.th), s = Math.sin(car.th);
     want.set(car.x + c * 2.15, car.y + 0.95, car.z + s * 2.15);
     look.set(car.x + c * 30, car.y + 1.0 + Math.tan(car.pitch) * 30, car.z + s * 30);
@@ -475,15 +532,17 @@ function updateCamera(dt, snap = false) {
     fov = THREE.MathUtils.clamp(2 * Math.atan(9 / d) * 180 / Math.PI, 12, 60);
     lerpK = 1000;
   }
-  if (snap) { camPos.copy(want); camLook.copy(look); }
+  if (snap || camMode === 2) { camPos.copy(want); camLook.copy(look); }
   else {
     camPos.lerp(want, Math.min(1, dt * lerpK));
     camLook.lerp(look, Math.min(1, dt * (lerpK > 50 ? 60 : 12)));
   }
-  if (camMode !== 3) camGroundClamp(camPos);
+  if (camMode !== 4 && camMode !== 2) camGroundClamp(camPos);
+  const wantNear = camMode === 2 ? 0.05 : 0.5;
+  if (camera.near !== wantNear) { camera.near = wantNear; camera.updateProjectionMatrix(); }
   if (freeCam) { camera.position.set(freeCam[0], freeCam[1], freeCam[2]); camera.lookAt(freeCam[3], freeCam[4], freeCam[5]); camera.fov = 60; camera.updateProjectionMatrix(); return; }
   camera.position.copy(camPos);
-  if (car.impact > 0.05) camera.position.add(new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(car.impact * 0.25));
+  if (car.impact > 0.05 && camMode !== 2) camera.position.add(new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(car.impact * 0.25));
   camera.lookAt(camLook);
   camera.fov += (fov - camera.fov) * (snap ? 1 : Math.min(1, dt * 3));
   camera.updateProjectionMatrix();
@@ -530,9 +589,11 @@ function updateHUD(dt) {
   const kmh = Math.abs(car.vx) * 3.6;
   $('speed').textContent = Math.round(metric ? kmh : kmh * 0.621371);
   $('unit').textContent = metric ? 'km/h' : 'mph';
-  const rpm = audio.rpm || (900 + Math.abs(car.vx) * 60);
-  $('tach').style.transform = `scaleX(${Math.min(1, rpm / 6000)})`;
-  $('gear').textContent = car.vx < -0.5 ? 'R' : (audio.gear || 1);
+  $('tach').style.transform = `scaleX(${Math.min(1, car.rpm / car.spec.limiter)})`;
+  $('rpm').textContent = Math.round(car.rpm / 100) * 100;
+  $('gear').textContent = car.gear < 0 ? 'R' : car.gear;
+  if (car.spec.boostMax) $('boost-fill').style.transform = `scaleX(${Math.max(0, car.boost) / car.spec.boostMax})`;
+  if (car.spec.nos) $('nos-fill').style.transform = `scaleX(${car.nosLeft / car.spec.nosCap})`;
   hudT -= dt;
   if (hudT <= 0) {
     hudT = 0.2;
@@ -602,6 +663,20 @@ function frame() {
   elapsed += dt;
   uniforms.uTime.value = elapsed;
 
+  if (garage?.open) {
+    // stationary in the showroom: blip the throttle with the Rev button
+    const tgt = revving ? car.spec.limiter * 0.92 : car.spec.idle;
+    car.rpm += (tgt - car.rpm) * Math.min(1, dt * (revving ? 3.5 / car.spec.inertia : 2.2));
+    car.engineLoad = revving ? 1 : 0;
+    if (car.limiterHit = car.rpm > car.spec.limiter * 0.9) car.rpm -= Math.random() * 300;
+    if (!revving && car.prevRev && car.rpm > 4000) car.events.pop = 0.8;
+    car.prevRev = revving;
+    car.vx = 0; car.slip = 0; car.boost = revving ? car.spec.boostMax * 0.6 : car.boost * 0.9;
+    audio.update(car, 0, false);
+    nature?.update(dt, { speed: 0, tunnel: 1, night: false, alaska: false, nearWater: 0, forest: 0, wind: 0, muted: audio.muted });
+    garage.frame(dt);
+    return;
+  }
   if (started) readInput(dt);
   else { input.steer = 0; input.throttle = 0; input.brake = 0; input.handbrake = false; }
   const px = car.x, pz = car.z;
@@ -661,7 +736,17 @@ function frame() {
   leaves.update(camera, (0.25 + 0.6 * (1 - a * 0.5)) * (1 - tfc) * (Q.leaves / 900), leafLight);
   uniforms.uWind.value = 0.8 + 0.4 * Math.sin(elapsed * 0.13);
 
-  audio.update(car.vx, input.throttle, car.slip, tunnelF, !car.onRoad);
+  audio.update(car, tunnelF, camMode === 2);
+  if (car.impact > 0.3 && !car.impactPlayed) { audio.impact(car.impact); car.impactPlayed = true; } else if (car.impact < 0.1) car.impactPlayed = false;
+  if (!nature && audio.ready) nature = new Nature(audio.ctx, audio.master);
+  waterT -= dt;
+  if (waterT <= 0) {
+    waterT = 1.5;
+    let w = 0;
+    for (let k = 0; k < 8; k++) { const a = k * 0.785; if (baseHeight(car.x + Math.cos(a) * 160, car.z + Math.sin(a) * 160) < 1.5) w++; }
+    nearWater = Math.min(1, w / 3);
+  }
+  nature?.update(dt, { speed: Math.abs(car.vx), tunnel: tunnelF, night: atm.night > 0.6, alaska: biomeAt(car.x, car.z) > 0.5, nearWater, forest: 1, wind: 1, muted: audio.muted });
   if (started) updateHUD(dt);
 
   // auto quality: if the first seconds of driving are slow, step down once
@@ -700,6 +785,7 @@ function frame() {
 }
 
 addEventListener('resize', () => {
+  garage?.resize();
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   if (composer) { const s = renderer.getDrawingBufferSize(new THREE.Vector2()); composer.setSize(innerWidth, innerHeight); bloom.resolution.set(s.x / 2, s.y / 2); }

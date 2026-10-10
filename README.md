@@ -23,7 +23,10 @@ Add `?q=0` … `?q=3` to the URL to force Low / Medium / High / Ultra quality. O
 | S / ↓ | Brake, then reverse |
 | A D / ← → | Steer |
 | Space | Handbrake (drift) |
-| C | Camera: chase, far chase, bumper, roadside TV camera, drone |
+| C | Camera: chase, far chase, cockpit, bumper, roadside TV camera, drone |
+| G | Garage: upgrades, tuning and customisation |
+| N | Nitrous (when fitted) |
+| E / Z | Shift up / down (manual gearbox, set in the garage) |
 | Mouse drag / wheel | Look around / zoom |
 | O | Scenic autopilot (steer or brake to take over) |
 | T | Time of day: morning mist, midday, golden hour, dusk, night |
@@ -36,6 +39,26 @@ Add `?q=0` … `?q=3` to the URL to force Low / Medium / High / Ultra quality. O
 | ? | Show all controls |
 
 A gamepad also works: left stick steers, triggers are throttle and brake, A/B is the handbrake, Y changes camera and X changes the time of day. On phones you get on-screen pedals plus CAM, TIME and AUTO buttons.
+
+## Garage
+
+Press **G** (or the Garage button) to open a showroom with the car on a turntable. Drag to orbit, scroll to zoom, and hold **Rev** to hear the engine. Every change is saved in your browser and applies on the road straight away.
+
+- **Upgrades** (`src/spec.js`): about 30 part slots with real-world part names and prices, across engine (intake, exhaust, headers, cams, valvetrain, forged internals, 4.9 L stroker, flywheel, ECU stages, fuel system), forced induction (centrifugal or twin-screw supercharger, two twin-turbo kits, intercooler, blow-off valve, three nitrous kits), drivetrain (clutch, close-ratio or sequential gearbox, LSDs, carbon half-shafts), chassis (five suspension types, anti-roll bars, bracing or a roll cage, weight reduction, carbon panels), brakes, five tire compounds and widths, and aero (lip, splitter, canards, ducktail, GT, swan-neck and time-attack wings, diffuser, skirts). Each option previews its change in horsepower, weight and PI.
+- **Tuning**: tire pressures, camber and toe, springs, ride height, bump and rebound damping, anti-roll bars, final drive and individual gear ratios, wing and splitter angles, brake balance and pressure, differential lock on acceleration and deceleration, boost, shift limiter and steering lock. Each setting unlocks only when the part that makes it adjustable is fitted, as in Forza.
+- **Stats**: a straight-line simulation using the same drivetrain model as the car gives power, torque, weight, 0–100 and 0–200 km/h, quarter mile, top speed, 100–0 braking distance, lateral grip, rating bars, a PI score with a class letter (D to X) and a dyno chart against stock. Stock comes out at 3.4 s to 100 km/h and an 11.0 s quarter mile, close to the real car.
+- **Style** (`src/carparts.js`): paint from 16 factory colours or any custom colour, in gloss, metallic, pearl, satin, matte or chrome finishes; twin, centre, side or two-tone stripes; window tint; nine wheel designs with colour, finish, size and caliper colour; body kit parts fitted to the body by ray casting; carbon widebody flares; wheel spacers and stance camber; headlight colour temperature, smoked tails and underglow; and in the interior, leather or carbon race buckets, 6-point harnesses, leather, accent and carpet colours and carbon or leather trim.
+- **Assists**: ABS, traction control (full, sport or off), stability control, and automatic or manual gearbox.
+
+## Driving model
+
+The car has a real drivetrain: a torque curve modelled on the F136 V8, gear ratios and final drive, clutch slip at launch, turbo spool, a rev limiter, wheelspin, downforce and drag, brake balance with lockup when ABS is off, a friction circle per axle, and differential behaviour.
+
+## Sound
+
+- **Engine** (`src/engine-worklet.js`): an AudioWorklet synthesises the V8 firing by firing. Pulses pass through resonators that track the firing order and through fixed exhaust formants. It includes per-cylinder variation, idle lope from race cams, limiter bounce and overrun crackle. Exhaust and intake upgrades change the character.
+- **Car sounds** (`src/audio.js`): turbo whistle and blow-off flutter, supercharger whine, straight-cut gear whine, shift clunks, tire squeal, tarmac and gravel road noise, wind, nitrous hiss, impacts, and convolution reverb in tunnels.
+- **Nature** (`src/nature.js`): wind gusts in the trees, rustling leaves, a creek when you're near water, and birds chosen by region and time of day: varied thrush, chickadee, Pacific wren, Steller's jay, raven, woodpecker and bald eagle by day, a barred owl and (in Alaska) distant wolves at night. The ambience fades as you speed up and goes quiet in tunnels.
 
 ## What's in the world
 
