@@ -1,0 +1,9 @@
+{
+  "name": "hollow-ridge",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A calm 3D wander through the Appalachian ridges in fall, with building and animals.",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": { "three": "0.160.0" },
+  "devDependencies": { "esbuild": "0.20.2" }
+}

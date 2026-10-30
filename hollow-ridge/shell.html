@@ -1,0 +1,104 @@
+<title>Hollow Ridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&family=Barlow:wght@400;500;600&display=swap">
+<style>
+  /* Full-bleed game canvas; HUD floats over it. One deliberate dark look in every theme. */
+  :root {
+    --ink: #f4e8d2;
+    --ink-dim: rgba(244, 232, 210, 0.7);
+    --panel: rgba(24, 15, 10, 0.62);
+    --panel-edge: rgba(244, 200, 140, 0.18);
+    --maple: #d9622b;
+    --gold: #e7b043;
+    --night: #0d0b0a;
+    --display: "IM Fell English", "Iowan Old Style", Georgia, serif;
+    --ui: "Barlow", "Segoe UI", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--night); color: var(--ink); font-family: var(--ui); }
+  canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #overlay {
+    position: fixed; inset: 0; display: grid; place-items: center; z-index: 20; overflow-y: auto;
+    background: radial-gradient(ellipse at 50% 60%, rgba(10, 6, 4, 0.12), rgba(10, 6, 4, 0.74));
+    padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+    transition: opacity 0.6s ease;
+  }
+  #overlay.gone { opacity: 0; pointer-events: none; }
+  .card { width: min(600px, 100%); display: grid; gap: 16px; text-align: left; }
+  .title { font-family: var(--display); font-size: clamp(48px, 9vw, 92px); line-height: 0.9; margin: 0; letter-spacing: -0.01em; text-wrap: balance; text-shadow: 0 2px 30px rgba(0,0,0,0.5); }
+  .title em { color: var(--gold); font-style: italic; }
+  .sub { font-family: var(--display); font-style: italic; font-size: 20px; color: var(--ink-dim); margin: -6px 0 0; }
+  .status { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--gold); min-height: 1.2em; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 14px; background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 6px; padding: 14px 16px; backdrop-filter: blur(6px); }
+  .keys b { font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .keys span { color: var(--ink-dim); }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button.go { font: 600 15px var(--ui); letter-spacing: 0.08em; text-transform: uppercase; background: var(--maple); color: #1b0f08; border: 0; border-radius: 4px; padding: 13px 26px; cursor: pointer; }
+  button.go:disabled { opacity: 0.4; cursor: wait; }
+  button.ghost { font: 500 13px var(--ui); background: transparent; color: var(--ink-dim); border: 1px solid var(--panel-edge); border-radius: 4px; padding: 10px 14px; cursor: pointer; }
+  button.seg { font: 500 13px var(--ui); background: transparent; color: var(--ink-dim); border: 1px solid var(--panel-edge); padding: 6px 12px; cursor: pointer; border-radius: 0; }
+  button.seg:first-of-type { border-radius: 4px 0 0 4px; } button.seg:last-of-type { border-radius: 0 4px 4px 0; }
+  button.seg[aria-pressed="true"] { background: rgba(231, 176, 67, 0.2); color: var(--ink); border-color: var(--gold); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  .sliders { display: grid; gap: 10px; font-size: 13px; }
+  .sliders label, .sliders .lab { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 12px; color: var(--ink-dim); }
+  .sliders input { accent-color: var(--maple); width: 100%; }
+  .segs { display: flex; flex-wrap: wrap; }
+  .note { font-size: 12px; color: var(--ink-dim); margin: 0; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+  #hud.hidden { display: none; }
+  #cross { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: rgba(255,245,225,0.85); box-shadow: 0 0 0 1.5px rgba(0,0,0,0.35); }
+  #info { position: absolute; left: max(16px, env(safe-area-inset-left, 0px)); top: max(14px, env(safe-area-inset-top, 0px)); font-size: 13px; color: var(--ink-dim); text-shadow: 0 1px 3px rgba(0,0,0,0.7); display: grid; gap: 2px; }
+  #info .clock { font-family: var(--display); font-size: 26px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  #bar { position: absolute; left: 50%; bottom: max(18px, env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; gap: 5px; }
+  .slot { width: 58px; padding: 7px 3px 6px; background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 5px; text-align: center; font-size: 11px; line-height: 1.15; color: var(--ink-dim); position: relative; }
+  .slot i { display: block; width: 24px; height: 16px; margin: 0 auto 5px; border-radius: 3px; }
+  .slot .k { position: absolute; left: 5px; top: 3px; font-size: 10px; opacity: 0.6; }
+  .slot.on { border-color: var(--gold); color: var(--ink); background: rgba(60, 34, 16, 0.75); }
+  #bar.off { opacity: 0.25; }
+  #toast { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); font-family: var(--display); font-style: italic; font-size: 22px; text-shadow: 0 2px 10px rgba(0,0,0,0.8); opacity: 0; transition: opacity 0.5s; white-space: nowrap; }
+  #toast.show { opacity: 1; }
+  @media (max-width: 900px) { .slot { width: 34px; font-size: 0; } .slot i { margin-bottom: 0; } }
+  @media (prefers-reduced-motion: reduce) { #overlay, #toast { transition: none; } }
+</style>
+
+<canvas id="game"></canvas>
+
+<div id="hud" class="hidden">
+  <div id="cross"></div>
+  <div id="info"><div class="clock" id="clock">4:30 pm</div><div id="mode">Walking</div></div>
+  <div id="bar"></div>
+  <div id="toast"></div>
+</div>
+
+<div id="overlay">
+  <div class="card">
+    <h1 class="title">Hollow <em>Ridge</em></h1>
+    <p class="sub">Late October in the Blue Ridge. Wander the hollers, follow the creek, visit the farm, build a cabin.</p>
+    <div class="status" id="status">Raising the ridges…</div>
+    <div class="row">
+      <button class="go" id="go" disabled>Walk in</button>
+      <button class="ghost" id="clear">Clear my builds</button>
+    </div>
+    <div class="sliders">
+      <label for="dream">Dream <input id="dream" type="range" min="0" max="1" step="0.01" value="0"></label>
+      <label for="tod">Time of day <input id="tod" type="range" min="0" max="24" step="0.05" value="16.6"></label>
+      <label for="vol">Sound <input id="vol" type="range" min="0" max="1" step="0.01" value="0.7"></label>
+      <div class="lab"><span>Graphics</span><div class="segs" role="group" aria-label="Graphics quality">
+        <button class="seg" data-q="auto" id="q-auto">Auto</button><button class="seg" data-q="low" id="q-low">Low</button><button class="seg" data-q="high" id="q-high">High</button><button class="seg" data-q="ultra" id="q-ultra">Ultra</button>
+      </div></div>
+    </div>
+    <div class="keys">
+      <b>WASD · mouse</b><span>walk and look · Shift to go faster</span>
+      <b>Space · F</b><span>jump · toggle flying (Space / C to rise and sink)</span>
+      <b>Left click an animal</b><span>pet it (the farm dog will follow you home)</span>
+      <b>Right · Left click</b><span>place a piece · take it back</span>
+      <b>1–0 · wheel · R</b><span>pick a piece · rotate it</span>
+      <b>Q / E · T</b><span>drift time backward / forward · hold time still</span>
+      <b>V · B · H · M · G</b><span>dream level · build mode · hide HUD · music · graphics</span>
+      <b>Esc</b><span>pause and come back here</span>
+    </div>
+    <p class="note">Builds save on this computer. Headphones recommended: the animals and the creek are placed around you.</p>
+  </div>
+</div>
+<script>/*__GAME__*/</script>
