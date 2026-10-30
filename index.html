@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0b0907">
+  <title>Mars AR</title>
+  <meta name="description" content="A 3D Mars you can hold in augmented reality. Real Viking and MGS imagery, MOLA-calibrated terrain, and the actual sunlit hemisphere right now.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
+</head>
+<body>
+  <video id="camera" playsinline muted autoplay hidden></video>
+  <canvas id="scene"></canvas>
+
+  <div id="overlay">
+    <div id="labels" aria-hidden="false"></div>
+
+    <!-- Start screen -->
+    <section id="intro" class="sheet intro">
+      <p class="eyebrow">Sol <span id="intro-sol">—</span> · Mars Year <span id="intro-my">—</span></p>
+      <h1>Mars AR</h1>
+      <p class="lede">Hold Mars in the room around you. Move your phone and the planet stays put in space; walk around it in room-scale mode.</p>
+      <ul class="facts">
+        <li>Surface color from the USGS Viking orbiter mosaic with Mars Global Surveyor detail</li>
+        <li>3D relief from the USGS MOLA laser-altimeter terrain, exaggerated so you can see it</li>
+        <li>Day and night drawn from where the Sun is over Mars right now</li>
+      </ul>
+      <div class="actions">
+        <button id="btn-xr" class="primary" hidden>Room-scale AR</button>
+        <button id="btn-ar" class="primary">Start AR camera</button>
+        <button id="btn-space" class="ghost">View without camera</button>
+      </div>
+      <p id="intro-note" class="note">Uses your rear camera and motion sensors. Nothing is recorded or uploaded.</p>
+      <p id="load-status" class="note mono">Loading Mars maps…</p>
+    </section>
+
+    <!-- HUD -->
+    <header id="hud-top" hidden>
+      <div class="clock">
+        <span class="mono" id="clock-mtc">--:--</span>
+        <span class="clock-sub"><span id="clock-label">MTC</span> · Sol <span id="clock-sol">—</span></span>
+      </div>
+      <div class="toolbar">
+        <button class="icon" id="btn-labels" aria-pressed="true" title="Show place names">Names</button>
+        <button class="icon" id="btn-moons" aria-pressed="true" title="Show Phobos and Deimos">Moons</button>
+        <button class="icon" id="btn-recenter" title="Bring Mars back in front of you">Recenter</button>
+      </div>
+    </header>
+
+    <section id="hud-bottom" class="sheet" hidden>
+      <div id="site-card" hidden>
+        <div class="site-head">
+          <div>
+            <p class="eyebrow" id="site-kind"></p>
+            <h2 id="site-name"></h2>
+          </div>
+          <button class="close" id="site-close" aria-label="Close">×</button>
+        </div>
+        <p id="site-text"></p>
+        <dl class="readout" id="site-data"></dl>
+      </div>
+
+      <div class="row">
+        <div class="seg" role="radiogroup" aria-label="Time speed">
+          <button role="radio" aria-checked="true" data-speed="1">Live</button>
+          <button role="radio" aria-checked="false" data-speed="3600">1 sol / 25 s</button>
+          <button role="radio" aria-checked="false" data-speed="40000">Seasons</button>
+        </div>
+        <label class="relief" for="relief">
+          <span>Relief <b class="mono" id="relief-val">10×</b></span>
+          <input id="relief" type="range" min="1" max="40" step="1" value="10">
+        </label>
+      </div>
+
+      <dl class="readout" id="readout">
+        <div><dt>Season (Ls)</dt><dd class="mono" id="ro-ls">—</dd></div>
+        <div><dt>North</dt><dd id="ro-season">—</dd></div>
+        <div><dt>Sun overhead</dt><dd class="mono" id="ro-sub">—</dd></div>
+        <div><dt>Earth date</dt><dd class="mono" id="ro-utc">—</dd></div>
+      </dl>
+      <p class="hint" id="hint">Drag to spin · pinch to zoom · tap a name</p>
+    </section>
+
+    <div id="toast" role="status" hidden></div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
